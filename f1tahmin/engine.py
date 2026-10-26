@@ -1,0 +1,381 @@
+"""Veri, model ve simülasyonu birbirine bağlayan katman: tahmin, backtest, şampiyonluk.
+
+İki model var:
+  v1  sıralama modeli (Plackett-Luce): yalnızca bitiş sıralarından öğrenir, hızlı.
+  v2  tur tur simülatör (lapengine + racesim): tur süreleri, lastik, pit, SC, sollama.
+Tur verisi yeterli olan her yarışta v2 kullanılır; backtest ikisini aynı yarışlarda karşılaştırır.
+"""
+from __future__ import annotations
+
+import json
+import math
+import threading
+
+import numpy as np
+
+from . import data, laps, odds
+from .lapengine import LapEngine
+from .model import fit_season, reliability, track_stats
+from .simulate import POINTS, Entry, SimResult, simulate, summarize, market_probs
+
+SPRINT_POINTS = np.array([8, 7, 6, 5, 4, 3, 2, 1] + [0] * 30)
+# v2 kalibrasyon ızgarası: (tempo ölçeği, form ölçeği)
+V2_GRID = [(s, f) for s in (0.8, 1.0, 1.25) for f in (0.0, 0.35, 0.7)]
+V2_CACHE = data.CACHE / "backtest_v2.json"
+V2_VERSION = 9  # simülatör/model kodu değişince artır: diskteki backtest geçersiz olur
+
+
+class Engine:
+    def __init__(self, refresh: bool = False):
+        self.lock = threading.RLock()
+        self.load(refresh)
+
+    def load(self, refresh: bool = False):
+        self.calendar = data.schedule(refresh=refresh)
+        self.races = data.races_compact(data.CURRENT_SEASON, refresh=refresh)
+        self.standings = data.driver_standings(refresh=refresh)
+        history = [r for s in data.HISTORY_SEASONS for r in data.races_compact(s)]
+        self.sc_history = data.safety_car_history(self.calendar)
+        self.ts = track_stats(history, self.sc_history)
+        self.done = {r["round"] for r in self.races}
+        self._pred_cache: dict = {}
+        self._sims: dict = {}
+        self._backtest = None
+        if refresh:  # yeni biten yarışların tur verisini indir
+            have = set(laps.available(data.CURRENT_SEASON))
+            for rd in sorted(self.done - have):
+                laps.fetch_race(data.CURRENT_SEASON, rd)
+        self.lap = LapEngine(self.races, self.ts)
+        # v1 kalibrasyonu: birleşik log loss'u en düşük sıcaklık
+        self.temps = {"pre": 1.0, "post": 1.0}
+        bt = self.backtest_v1()
+        self.temps = {"pre": bt["modes"]["pre_quali"]["best_temperature"],
+                      "post": bt["modes"]["post_quali"]["best_temperature"]}
+        # v2 kalibrasyonu: tempo ve form ölçeği (diskte saklanır; yeni veri gelince yeniden hesaplanır)
+        self.v2_params = {"pre": (1.0, 1.0), "post": (1.0, 1.0)}
+        bt2 = self.backtest_v2()
+        if bt2:
+            self.v2_params = {"pre": tuple(bt2["modes"]["pre_quali"]["best"]),
+                              "post": tuple(bt2["modes"]["post_quali"]["best"])}
+
+    # ------------------------------------------------------------------ #
+
+    def race_info(self, round_: int) -> dict:
+        return next(r for r in self.calendar if int(r["round"]) == round_)
+
+    def next_round(self) -> int | None:
+        future = [int(r["round"]) for r in self.calendar if int(r["round"]) not in self.done]
+        return min(future) if future else None
+
+    def calendar_view(self) -> list[dict]:
+        nxt = self.next_round()
+        return [{
+            "round": int(r["round"]), "name": r["raceName"], "date": r["date"],
+            "circuit": r["Circuit"]["circuitId"], "locality": r["Circuit"]["Location"]["locality"],
+            "sprint": "Sprint" in r,
+            "status": "done" if int(r["round"]) in self.done else ("next" if int(r["round"]) == nxt else "upcoming"),
+        } for r in self.calendar]
+
+    def entries_for(self, round_: int) -> list[Entry]:
+        own = next((r for r in self.races if r["round"] == round_), None)
+        src = own or max((r for r in self.races if r["round"] < round_), key=lambda r: r["round"])
+        return [Entry(x["driver"], x["team"], x["code"], x["name"], x["team_name"]) for x in src["results"]]
+
+    def _quali_order(self, round_: int) -> list[str] | None:
+        race = next((r for r in self.races if r["round"] == round_), None)
+        if race and race["quali"]:
+            return race["quali"]
+        # Sıralama yapıldı ama yarış henüz koşulmadıysa: ayrı uç noktadan bak
+        try:
+            q = data.qualifying(data.CURRENT_SEASON)
+        except Exception:
+            return None
+        hit = next((r for r in q if int(r["round"]) == round_), None)
+        if not hit:
+            return None
+        return [x["Driver"]["driverId"] for x in sorted(hit["QualifyingResults"], key=lambda x: int(x["position"]))]
+
+    def _grid_for(self, round_: int, grid_mode: str) -> list[str] | None:
+        if grid_mode == "actual":  # backtest: gerçek start gridi
+            res = next(r for r in self.races if r["round"] == round_)["results"]
+            return [x["driver"] for x in sorted(res, key=lambda x: x["grid"] or 99)]
+        if grid_mode == "auto" and round_ not in self.done:
+            return self._quali_order(round_)
+        return None
+
+    def _weather(self, round_: int, rain_prob: float | None):
+        if rain_prob is not None:
+            return None, rain_prob
+        weather = data.rain_forecast(self.race_info(round_)) if round_ not in self.done else None
+        return weather, (weather["rain_prob"] if weather else 0.0)
+
+    def _run(self, round_: int, grid_mode: str = "auto", n_sims: int = 20000,
+             temperature: float | None = None, rain_prob: float | None = None, seed: int | None = None):
+        """v1: sıralama modeli."""
+        race_r, quali_r = fit_season(self.races, round_, self.ts)
+        rel = reliability(self.races, round_)
+        info = self.race_info(round_)
+        entries = self.entries_for(round_)
+        known_grid = self._grid_for(round_, grid_mode)
+        if temperature is None:
+            temperature = self.temps["post" if known_grid else "pre"]
+        weather, rain_prob = self._weather(round_, rain_prob)
+        sim = simulate(entries, race_r, quali_r, rel, self.ts, info["Circuit"]["circuitId"],
+                       n_sims=n_sims, known_grid=known_grid, rain_prob=rain_prob,
+                       temperature=temperature, seed=round_ if seed is None else seed)
+        return sim, race_r, quali_r, rel, weather, known_grid
+
+    def _run_v2(self, round_: int, grid_mode: str = "auto", n_sims: int = 20000,
+                params: tuple[float, float] | None = None, rain_prob: float | None = None, seed: int | None = None):
+        """v2: tur tur simülatör. RaceSim, meta, hava, grid ve v1 biçimli özet nesnesi döner."""
+        info = self.race_info(round_)
+        entries = self.entries_for(round_)
+        known_grid = self._grid_for(round_, grid_mode)
+        if params is None:
+            params = self.v2_params["post" if known_grid else "pre"]
+        weather, rain_prob = self._weather(round_, rain_prob)
+        rs, meta = self.lap.run(round_, info["Circuit"]["circuitId"], entries, known_grid, rain_prob,
+                                n=n_sims, seed=round_ if seed is None else seed,
+                                pace_scale=params[0], form_scale=params[1])
+        v1like = SimResult(entries, rs.positions, rs.grid, rs.dnf, rs.sc_count > 0, rs.rain)
+        return rs, meta, weather, known_grid, v1like
+
+    # ------------------------------------------------------------------ #
+
+    def predict(self, round_: int, grid_mode: str = "auto") -> dict:
+        key = (round_, grid_mode)
+        with self.lock:
+            if key in self._pred_cache:
+                return self._pred_cache[key]
+            info = self.race_info(round_)
+            circuit = info["Circuit"]["circuitId"]
+            base_meta = {
+                "round": round_, "name": info["raceName"], "date": info["date"],
+                "circuit": circuit, "locality": info["Circuit"]["Location"]["locality"],
+                "trained_on": len([r for r in self.races if r["round"] < round_]),
+            }
+            if self.lap.ready_for(round_):
+                rs, meta, weather, known_grid, sim = self._run_v2(round_, grid_mode)
+                out = summarize(sim)
+                out.update(_v2_extras(rs, sim.entries, meta))
+                ps, fs = self.v2_params["post" if known_grid else "pre"]
+                out["meta"] = {**base_meta, "model": "v2", "grid_known": bool(known_grid), "weather": weather,
+                               "pace_scale": ps, "form_scale": fs, "v2": meta}
+            else:
+                sim, race_r, _, rel, weather, known_grid = self._run(round_, grid_mode)
+                out = summarize(sim)
+                out["meta"] = {**base_meta, "model": "v1", "grid_known": bool(known_grid), "weather": weather,
+                               "temperature": self.temps["post" if known_grid else "pre"]}
+            rel = reliability(self.races, round_)
+            out["meta"]["track_v1"] = {"grid_factor": self.ts.grid(circuit), "dnf_factor": self.ts.dnf(circuit)}
+            out["ratings"] = sorted(({"team": t, "dnf_rate": r} for t, r in rel.team_rate.items()
+                                     if t in {e.team for e in sim.entries}), key=lambda r: r["dnf_rate"])
+            if round_ in self.done:
+                res = next(r for r in self.races if r["round"] == round_)["results"]
+                out["actual"] = [{"code": x["code"], "pos": x["pos"], "kind": x["kind"]} for x in res]
+            self._pred_cache[key] = out
+            self._sims[key] = sim
+            return out
+
+    def analyze_odds(self, round_: int, market: str, odds_in: dict[str, float]) -> dict:
+        self.predict(round_)
+        sim = self._sims[(round_, "auto")]
+        labels = {e.driver: f"{e.code} · {e.name}" for e in sim.entries}
+        return odds.analyze(market, odds_in, market_probs(sim, market), labels)
+
+    # ------------------------------------------------------------------ #
+    # Backtest: her yarışı yalnızca ÖNCEKİ yarışlarla tahmin et (sızıntı yok)
+    # ------------------------------------------------------------------ #
+
+    def _score(self, runs: list[tuple[int, list[str], np.ndarray]]) -> dict:
+        stats = {"logloss": [], "ll_place": [], "brier_win": [], "brier_podium": [], "brier_top10": [],
+                 "fav_won": [], "winner_in_top3": [], "calib": [], "per_round": []}
+        n = 20
+        for rd, drivers, pos in runs:
+            res = {x["driver"]: x for x in next(r for r in self.races if r["round"] == rd)["results"]}
+            n = len(drivers)
+            p_win, p_pod, p_t10 = (np.mean(pos == 1, axis=0), np.mean(pos <= 3, axis=0), np.mean(pos <= 10, axis=0))
+            actual = np.array([res[d]["pos"] if d in res else 99 for d in drivers])
+            winner = int(np.argmin(actual))
+            ll = -math.log(max(p_win[winner], 1e-4))
+            stats["logloss"].append(ll)
+            stats["per_round"].append({"round": rd, "logloss": ll, "p_winner": float(p_win[winner]),
+                                       "winner": drivers[winner], "favourite": drivers[int(np.argmax(p_win))]})
+            stats["ll_place"].append(_binary_ll(p_pod, actual <= 3) + _binary_ll(p_t10, actual <= 10))
+            stats["brier_win"].append(float(np.mean((p_win - (actual == 1)) ** 2)))
+            stats["brier_podium"].append(float(np.mean((p_pod - (actual <= 3)) ** 2)))
+            stats["brier_top10"].append(float(np.mean((p_t10 - (actual <= 10)) ** 2)))
+            stats["fav_won"].append(int(np.argmax(p_win) == winner))
+            stats["winner_in_top3"].append(int(winner in np.argsort(-p_win)[:3]))
+            stats["calib"].extend(zip(p_pod.tolist(), (actual <= 3).astype(int).tolist()))
+            stats["calib"].extend(zip(p_t10.tolist(), (actual <= 10).astype(int).tolist()))
+        return {
+            "logloss": float(np.mean(stats["logloss"])),
+            "logloss_uniform": math.log(n),
+            # seçim ölçütü: kazanan + podyum + ilk 10 log loss (hepsi nat cinsinden)
+            "combined": float(np.mean(stats["logloss"]) + np.mean(stats["ll_place"])),
+            "brier_win": float(np.mean(stats["brier_win"])),
+            "brier_podium": float(np.mean(stats["brier_podium"])),
+            "brier_top10": float(np.mean(stats["brier_top10"])),
+            "brier_podium_base": float((3 / n) * (1 - 3 / n)),
+            "brier_top10_base": float((10 / n) * (1 - 10 / n)),
+            "fav_won": float(np.mean(stats["fav_won"])),
+            "winner_in_top3": float(np.mean(stats["winner_in_top3"])),
+            "calibration": _calibration(stats["calib"]),
+            "per_round": stats["per_round"],
+        }
+
+    def _bt_rounds(self, start_round: int = 4) -> list[int]:
+        return sorted(r for r in self.done if r >= start_round and self.lap.ready_for(r))
+
+    def backtest_v1(self, temps=(0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.2), n_sims: int = 6000) -> dict:
+        rounds = self._bt_rounds()
+        modes = {}
+        for mode, grid_mode in (("pre_quali", "simulated"), ("post_quali", "actual")):
+            per = {}
+            for T in temps:
+                runs = []
+                for rd in rounds:
+                    sim, *_ = self._run(rd, grid_mode, n_sims=n_sims, temperature=T, rain_prob=0.0)
+                    runs.append((rd, [e.driver for e in sim.entries], sim.positions))
+                per[T] = self._score(runs)
+            best = min(per, key=lambda t: per[t]["combined"])
+            modes[mode] = {"by_temperature": {str(k): v for k, v in per.items()}, "best_temperature": best}
+        self._bt_v1 = {"rounds": rounds, "modes": modes}
+        return self._bt_v1
+
+    def _v2_signature(self) -> str:
+        return json.dumps({"cov": self.lap.coverage(), "done": sorted(self.done), "grid": V2_GRID, "v": V2_VERSION})
+
+    def backtest_v2(self, n_sims: int = 3000, force: bool = False) -> dict | None:
+        rounds = self._bt_rounds()
+        if not rounds:
+            return None
+        sig = self._v2_signature()
+        if V2_CACHE.exists() and not force:
+            cached = json.loads(V2_CACHE.read_text(encoding="utf-8"))
+            if cached.get("signature") == sig:
+                self._bt_v2 = cached
+                return cached
+        print(f"v2 backtest: {len(rounds)} yarış × 2 mod × {len(V2_GRID)} ayar ...", flush=True)
+        modes = {}
+        for mode, grid_mode in (("pre_quali", "simulated"), ("post_quali", "actual")):
+            per = {}
+            for params in V2_GRID:
+                runs = []
+                for rd in rounds:
+                    rs, _, _, _, sim = self._run_v2(rd, grid_mode, n_sims=n_sims, params=params, rain_prob=0.0)
+                    runs.append((rd, [e.driver for e in sim.entries], rs.positions))
+                per[params] = self._score(runs)
+                print(f"  {mode} tempo×{params[0]} form×{params[1]}: log loss {per[params]['logloss']:.3f}, "
+                      f"birleşik {per[params]['combined']:.2f}", flush=True)
+            best = min(per, key=lambda k: per[k]["combined"])
+            modes[mode] = {"by_params": {f"{k[0]}|{k[1]}": v for k, v in per.items()}, "best": list(best)}
+        out = {"signature": sig, "rounds": rounds, "modes": modes}
+        V2_CACHE.write_text(json.dumps(out), encoding="utf-8")
+        self._bt_v2 = out
+        return out
+
+    def backtest(self) -> dict:
+        return {"v1": self._bt_v1, "v2": getattr(self, "_bt_v2", None)}
+
+    # ------------------------------------------------------------------ #
+    # Şampiyonluk: kalan yarışları simüle et, mevcut puanlara ekle
+    # ------------------------------------------------------------------ #
+
+    def championship(self, n_sims: int = 4000) -> dict:
+        key = ("champ",)
+        with self.lock:
+            if key in self._pred_cache:
+                return self._pred_cache[key]
+        nxt = self.next_round()
+        current = {s["Driver"]["driverId"]: float(s["points"]) for s in self.standings}
+        names = {s["Driver"]["driverId"]: s["Driver"].get("code", s["Driver"]["familyName"][:3].upper()) for s in self.standings}
+        remaining = [int(r["round"]) for r in self.calendar if int(r["round"]) not in self.done]
+        if not remaining:
+            return {"remaining": [], "rows": []}
+        ids = [e.driver for e in self.entries_for(nxt)]
+        totals = np.array([current.get(d, 0.0) for d in ids])[None, :].repeat(n_sims, axis=0)
+
+        def race(rd, seed):
+            if self.lap.ready_for(rd):
+                rs, _, _, _, sim = self._run_v2(rd, "simulated", n_sims=n_sims, rain_prob=0.0, seed=seed)
+            else:
+                sim, *_ = self._run(rd, "simulated", n_sims=n_sims, rain_prob=0.0, seed=seed)
+            idx = [[e.driver for e in sim.entries].index(d) for d in ids]
+            return sim.positions[:, idx]
+
+        for rd in remaining:
+            totals += POINTS[race(rd, rd) - 1]
+            if "Sprint" in self.race_info(rd):
+                # sprint: aynı güçlerle ikinci, bağımsız bir kısa yarış
+                totals += SPRINT_POINTS[race(rd, rd + 1000) - 1]
+        champ = np.argmax(totals + np.random.default_rng(0).random(totals.shape) * 1e-3, axis=1)
+        rows = sorted(({
+            "driver": d, "code": names.get(d, d[:3].upper()),
+            "points_now": current.get(d, 0.0),
+            "exp_points": float(np.mean(totals[:, j])),
+            "p10": float(np.percentile(totals[:, j], 10)),
+            "p90": float(np.percentile(totals[:, j], 90)),
+            "champion": float(np.mean(champ == j)),
+        } for j, d in enumerate(ids)), key=lambda r: (-r["champion"], -r["exp_points"]))
+        out = {"remaining": remaining, "rows": rows, "n_sims": n_sims}
+        with self.lock:
+            self._pred_cache[key] = out
+        return out
+
+
+def _v2_extras(rs, entries, meta) -> dict:
+    """Tur tur simülasyonun ek piyasaları."""
+    n, D = rs.positions.shape
+    pace = {p["driver"]: p for p in meta["pace"]}
+    extra_rows = {}
+    for j, e in enumerate(entries):
+        extra_rows[e.driver] = {
+            "fastest_lap": float(np.mean(rs.fastest_lap == j)),
+            "lap1_lead": float(np.mean(rs.lap1_leader == j)),
+            "exp_grid": float(np.mean(rs.grid[:, j])),
+            "exp_stops": float(np.mean(rs.stops[:, j])),
+            "race_sec": pace[e.driver]["race_sec"],
+            "race_pct": pace[e.driver]["race_pct"],
+            "race_sd": pace[e.driver]["race_sd"],
+            "quali_pct": pace[e.driver]["quali_pct"],
+        }
+    winner_team: dict[str, float] = {}
+    win_idx = np.argmin(rs.positions, axis=1)
+    for j, e in enumerate(entries):
+        winner_team[e.team_name] = winner_team.get(e.team_name, 0.0) + float(np.mean(win_idx == j))
+    sc = rs.sc_count
+    m = rs.margin[np.isfinite(rs.margin)]
+    finishers = (~rs.dnf).sum(axis=1)
+    return {
+        "extra": extra_rows,
+        "winner_team": sorted(({"team": k, "p": v} for k, v in winner_team.items()), key=lambda r: -r["p"]),
+        "events": {
+            "sc_dist": [float(np.mean(sc == 0)), float(np.mean(sc == 1)), float(np.mean(sc == 2)), float(np.mean(sc >= 3))],
+            "vsc_any": float(np.mean(rs.vsc_count > 0)),
+            "neutral_any": float(np.mean((sc + rs.vsc_count) > 0)),
+            "margin_q": [float(np.percentile(m, q)) for q in (10, 25, 50, 75, 90)] if m.size else None,
+            "margin_lt5": float(np.mean(m < 5)) if m.size else None,
+            "finishers_mean": float(np.mean(finishers)),
+            "finishers_dist": {str(k): float(np.mean(finishers == k)) for k in range(max(int(finishers.min()), D - 6), D + 1)},
+        },
+    }
+
+
+def _binary_ll(p: np.ndarray, y: np.ndarray) -> float:
+    p = np.clip(p, 1e-3, 1 - 1e-3)
+    return float(-np.sum(np.where(y, np.log(p), np.log(1 - p))))
+
+
+def _calibration(pairs: list[tuple[float, int]], bins: int = 10) -> list[dict]:
+    p = np.array([a for a, _ in pairs])
+    y = np.array([b for _, b in pairs])
+    out = []
+    for i in range(bins):
+        lo, hi = i / bins, (i + 1) / bins
+        m = (p >= lo) & (p < hi if i < bins - 1 else p <= hi)
+        if m.sum() >= 5:
+            out.append({"bin": f"{int(lo*100)}–{int(hi*100)}%", "pred": float(p[m].mean()),
+                        "actual": float(y[m].mean()), "n": int(m.sum())})
+    return out

@@ -1,0 +1,25 @@
+# İndirilen veri ve hesaplanan önbellek (her kullanıcı kendi indirir; üçüncü taraf veridir)
+cache/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# Gizli bilgiler: asla commit'lenmez
+.env
+.env.*
+*.pem
+*.key
+secrets*.json
+
+# Yerel araç / editör ayarları ve oturum durumu
+.claude/
+.omc/
+.vscode/
+.idea/
+*.log
+Thumbs.db
+.DS_Store
