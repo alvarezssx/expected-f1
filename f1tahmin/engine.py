@@ -22,7 +22,7 @@ SPRINT_POINTS = np.array([8, 7, 6, 5, 4, 3, 2, 1] + [0] * 30)
 # v2 kalibrasyon ızgarası: (tempo ölçeği, form ölçeği)
 V2_GRID = [(s, f) for s in (0.8, 1.0, 1.25) for f in (0.0, 0.35, 0.7)]
 V2_CACHE = data.CACHE / "backtest_v2.json"
-V2_VERSION = 9  # simülatör/model kodu değişince artır: diskteki backtest geçersiz olur
+V2_VERSION = 10  # simülatör/model kodu değişince artır: diskteki backtest geçersiz olur
 
 
 class Engine:
@@ -189,7 +189,8 @@ class Engine:
 
     def _score(self, runs: list[tuple[int, list[str], np.ndarray]]) -> dict:
         stats = {"logloss": [], "ll_place": [], "brier_win": [], "brier_podium": [], "brier_top10": [],
-                 "fav_won": [], "winner_in_top3": [], "calib": [], "per_round": []}
+                 "fav_won": [], "winner_in_top3": [], "calib": [], "per_round": [],
+                 "podium_hit": [], "top10_hit": [], "h2h": []}
         n = 20
         for rd, drivers, pos in runs:
             res = {x["driver"]: x for x in next(r for r in self.races if r["round"] == rd)["results"]}
@@ -207,6 +208,19 @@ class Engine:
             stats["brier_top10"].append(float(np.mean((p_t10 - (actual <= 10)) ** 2)))
             stats["fav_won"].append(int(np.argmax(p_win) == winner))
             stats["winner_in_top3"].append(int(winner in np.argsort(-p_win)[:3]))
+            # Sezgisel isabet oranları: tahmin edilen ilk 3 / ilk 10'un kaçı gerçekten oraya girdi
+            stats["podium_hit"].append(len(set(np.argsort(-p_pod)[:3]) & set(np.nonzero(actual <= 3)[0])) / 3)
+            stats["top10_hit"].append(len(set(np.argsort(-p_t10)[:10]) & set(np.nonzero(actual <= 10)[0])) / 10)
+            # Takım arkadaşı düellosu: önde bitirmesi beklenen gerçekten önde bitirdi mi
+            team = {d: res[d]["team"] for d in drivers if d in res}
+            idx = {d: j for j, d in enumerate(drivers)}
+            for t in set(team.values()):
+                pair = [d for d in drivers if team.get(d) == t]
+                if len(pair) == 2:
+                    a, b = (idx[d] for d in pair)
+                    pa = float(np.mean(pos[:, a] < pos[:, b]))
+                    if pa != 0.5 and actual[a] != actual[b]:
+                        stats["h2h"].append(int((pa > 0.5) == (actual[a] < actual[b])))
             stats["calib"].extend(zip(p_pod.tolist(), (actual <= 3).astype(int).tolist()))
             stats["calib"].extend(zip(p_t10.tolist(), (actual <= 10).astype(int).tolist()))
         return {
@@ -221,6 +235,11 @@ class Engine:
             "brier_top10_base": float((10 / n) * (1 - 10 / n)),
             "fav_won": float(np.mean(stats["fav_won"])),
             "winner_in_top3": float(np.mean(stats["winner_in_top3"])),
+            "podium_hit": float(np.mean(stats["podium_hit"])),
+            "top10_hit": float(np.mean(stats["top10_hit"])),
+            "h2h_acc": float(np.mean(stats["h2h"])) if stats["h2h"] else None,
+            "h2h_n": len(stats["h2h"]),
+            "n_races": len(stats["logloss"]),
             "calibration": _calibration(stats["calib"]),
             "per_round": stats["per_round"],
         }

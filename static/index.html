@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Pit Oranı</title>
+<title>Expected F1</title>
 <style>
 :root{
   --bg:#f6f7f9; --panel:#ffffff; --ink:#14171c; --muted:#5d6673; --line:#e3e6ea;
@@ -82,23 +82,27 @@ nav{min-width:0}
 footer{color:var(--muted);font-size:12px;text-align:center;padding:24px 16px;border-top:1px solid var(--line)}
 details summary{cursor:pointer;color:var(--muted);font-weight:600}
 svg text{fill:var(--muted);font-size:11px}
-.how{max-width:860px}
-.how h2{font-size:16px;margin:22px 0 8px}
-.how p,.how li{color:var(--ink);line-height:1.6}
-.how ol,.how ul{padding-left:20px}
-.formula{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;background:var(--chip);border-radius:8px;padding:10px 12px;overflow-x:auto;white-space:pre;font-size:13px;margin:8px 0}
-.step{display:inline-flex;align-items:center;justify-content:center;width:24px;height:24px;border-radius:50%;background:var(--accent);color:#fff;font-size:12px;font-weight:700;margin-right:8px}
+.engine{max-width:1000px}
+.bigstats{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin:8px 0 22px}
+.big{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:18px 14px;box-shadow:var(--shadow)}
+.big b{display:block;font-size:30px;letter-spacing:-.02em;color:var(--accent);font-variant-numeric:tabular-nums}
+.big span{color:var(--muted);font-size:13px}
+.layers{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:10px;margin-bottom:18px}
+.layer{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:12px 14px;display:grid;grid-template-columns:auto 1fr;column-gap:12px}
+.layer i{font-style:normal;font-weight:800;color:var(--accent);grid-row:span 2;font-size:18px;align-self:center}
+.layer b{font-size:14px}
+.layer span{color:var(--muted);font-size:12px}
 </style>
 </head>
 <body>
 <header><div class="wrap top">
-  <div class="logo">Pit<span>Oranı</span></div>
+  <div class="logo">Expected<span>F1</span></div>
   <nav id="tabs">
     <button data-tab="race" class="on">Yarış Tahmini</button>
     <button data-tab="odds">Oran Analizi</button>
     <button data-tab="champ">Şampiyonluk</button>
     <button data-tab="perf">Model Performansı</button>
-    <button data-tab="how">Nasıl Çalışır</button>
+    <button data-tab="how">Motor</button>
   </nav>
   <div class="spacer"></div>
   <button class="btn ghost" id="refresh" title="Jolpica'dan yeni sonuçları çek">Verileri yenile</button>
@@ -151,61 +155,35 @@ svg text{fill:var(--muted);font-size:11px}
   <!-- PERFORMANS -->
   <section id="tab-perf" class="hidden"><div id="perfBody"><div class="loading">Yükleniyor…</div></div></section>
 
-  <!-- NASIL ÇALIŞIR -->
-  <section id="tab-how" class="hidden"><div class="how">
-    <h1>Bir yarış nasıl simüle ediliyor?</h1>
-    <p class="sub">Her yarış 20.000 kez, tur tur, baştan sona koşturulur. Tüm bahis türleri bu 20.000 yarışın sonuçlarından sayılarak çıkar; bu yüzden birbirleriyle tutarlıdır (podyum olasılığı asla kazanmadan düşük olamaz).</p>
-
-    <h2><span class="step">1</span>Ham veri: her tur, her sürücü</h2>
-    <p>2023–2026 arası 87 yarışın tur tur süreleri, pozisyonları ve pit stopları (Jolpica). Bir yarıştan şunlar ölçülür, hepsi saniye cinsinden:</p>
-    <div class="formula">tur_süresi = b + tempo_sürücü + β·tur_no + δ·lastik_yaşı + stint_etkisi + θ·[öndekine &lt;1 sn] + ε</div>
-    <ul>
-      <li><b>tempo</b>: sürücünün yakıt, lastik ve trafikten arındırılmış gerçek yarış hızı (Huber-robust regresyon; pit, ilk tur ve güvenlik aracı turları hariç)</li>
-      <li><b>β</b> yakıt etkisi (araç hafifledikçe hızlanma), <b>δ</b> lastik aşınması, <b>θ</b> kirli hava kaybı</li>
-      <li><b>Güvenlik aracı / VSC</b>: tüm alan aynı anda %15+ yavaşladıysa nötr tur; alan sıkıştıysa SC, aralar korunduysa VSC</li>
-      <li><b>Pit kaybı</b>, takım bazında pit ekibi hızı ve yavaş pit olasılığı</li>
-      <li><b>İlk tur</b>: grid sırasına göre kaç pozisyon kazanılıp kaybedildiği</li>
-      <li><b>Sollama denemeleri</b>: 1.5 sn içinde takip eden her araç çifti için tempo farkı, mesafe ve geçip geçmediği (~26.000 deneme)</li>
-    </ul>
-
-    <h2><span class="step">2</span>Tempo modeli: Gauss süreci (Kalman tipi)</h2>
-    <div class="formula">tempo[sürücü, yarış] = araç[takım, yarış] + sürücü_farkı + form + ölçüm_hatası
-araç[t, r] = araç[t, r−1] + gelişim         gelişim ~ N(0, q²)   (araçlar sezon içinde gelişir)</div>
-    <p>q, sürücü farkı ve form varyansı <b>marjinal olabilirlik</b> maksimize edilerek veriden seçilir. Sonuç tek sayı değil, tüm sürücüler için ortak bir olasılık dağılımıdır: takım arkadaşları aynı aracın belirsizliğini paylaşır. Aynı model sıralama turu temposu için de ayrıca kurulur.</p>
-    <p>Sıralama turu bittiyse, gerçek sıralama temposu o hafta sonunun yarış temposu hakkında kanıttır. Bunu bir <b>yığınlama regresyonu</b> birleştirir (katsayılar yalnızca geçmiş yarışların ileriye dönük hatalarından öğrenilir):</p>
-    <div class="formula">yarış_temposu ≈ c₁·GP_tahmini + c₂·gerçek_sıralama_temposu + c₀</div>
-
-    <h2><span class="step">3</span>Pist parametreleri</h2>
-    <p>Her pist için tüm yılların verisi; az veri olan pistler genel ortalamaya doğru çekilir (hiyerarşik büzülme). Sollama olasılığı tüm takip verisine uydurulmuş lojistik modelden gelir:</p>
-    <div class="formula">P(bu tur geçer) = σ( a_pist + a_2026 + b₁·tempo_farkı + b₂·takip_mesafesi )</div>
-    <p>Monaco'da a_pist çok düşük, Austin ve Abu Dhabi'de yüksek; 2026 kuralları için ayrı bir kaydırma terimi var.</p>
-
-    <h2><span class="step">4</span>Bir simülasyonun içi</h2>
-    <ol>
-      <li><b>Belirsizlik çekilir</b>: her simülasyon, tempo dağılımından farklı bir "gerçek" tempo seti örnekler (parametre belirsizliği).</li>
-      <li><b>Sıralama turları</b>: Q1 (22→16), Q2 (16→10), Q3; her seansta tek tur gürültüsü. Sıralama bittiyse gerçek grid kullanılır.</li>
-      <li><b>Strateji</b>: yarışın baskın durak sayısı pistin geçmişinden çekilir; sürücülerin bir kısmı farklı strateji dener. Stratejiler toplam süre açısından dengelidir, farkı uygulama belirler.</li>
-      <li><b>Olaylar</b>: güvenlik aracı ve VSC sayısı Poisson; bir kısmı DNF'lerin tetiklediği olaylardır (kaza → SC korelasyonu).</li>
-      <li><b>Start</b>: grid aralığı + grid sırasına göre kalibre edilmiş start gürültüsü (pole az, orta grup çok karışır).</li>
-      <li><b>Her tur</b>: tur süresi = referans + tempo + yakıt + aşınma·lastik_yaşı + kalın kuyruklu gürültü. Pit planı geldiyse pit; güvenlik aracında pit penceresi açıksa ucuz pit; arkadaki pite girdiyse undercut savunması.</li>
-      <li><b>Sıra sıra etkileşim</b>: öndekine 1.5 sn'den yakın her araç sollama dener (lojistik model). Geçemezse kirli havada tipik takip mesafesine (veriden ~0.8 sn) düşer.</li>
-      <li><b>SC turu</b>: alan 0.8 sn aralıklı trene dizilir, sollama yok. <b>VSC</b>: herkes yavaşlar, aralar korunur.</li>
-      <li><b>DNF</b>: takım güvenilirliği × pist katsayısı; ilk tur kazaları ayrı.</li>
-    </ol>
-
-    <h2><span class="step">5</span>Kalibrasyon ve dürüstlük</h2>
-    <p>Model her 2026 yarışını yalnızca öncesindeki verilerle tahmin eder (ileriye dönük test). İki ayar (tempo ölçeği, form ölçeği) bu testte en düşük log loss'a göre seçilir: simülatör strateji ve trafik rastgeleliğini kendisi ürettiği için, tempo modelindeki form varyansının bir kısmı çift sayılmasın diye. Sonuçlar ve kalibrasyon grafiği <b>Model Performansı</b> sekmesinde.</p>
-
-    <h2>Bilinen sınırlar</h2>
-    <ul>
-      <li>Lastik hamuru verisi yok (F1'in kendi arşivi kapalı): aşınma tek bir ortalama hızla modelleniyor.</li>
-      <li>Antrenman (FP) long-run temposu kullanılmıyor; Jolpica antrenman turu vermiyor.</li>
-      <li>Grid cezaları bilinmiyor; sıralama sırası grid kabul ediliyor.</li>
-      <li>Pole'dan başlayanın kazanma şansı biraz düşük tahmin ediliyor.</li>
-    </ul>
+  <!-- MOTOR -->
+  <section id="tab-how" class="hidden"><div class="engine">
+    <h1>Motor</h1>
+    <p class="sub">Her tahminin arkasında, tur tur koşturulan 20.000 yarış var.</p>
+    <div class="bigstats">
+      <div class="big"><b>25M+</b><span>araç-tur simülasyonu / tahmin</span></div>
+      <div class="big"><b>98.000+</b><span>gerçek tur verisi</span></div>
+      <div class="big"><b>88</b><span>yarış (2023–2026)</span></div>
+      <div class="big"><b>26.000+</b><span>sollama denemesi</span></div>
+      <div class="big"><b>3.200+</b><span>pit stop</span></div>
+      <div class="big"><b>11</b><span>model katmanı</span></div>
+    </div>
+    <div class="layers">
+      <div class="layer"><i>01</i><b>Robust tur regresyonu</b><span>Huber · yakıt · lastik · kirli hava</span></div>
+      <div class="layer"><i>02</i><b>Olay tespiti</b><span>Güvenlik aracı · VSC · kırmızı bayrak</span></div>
+      <div class="layer"><i>03</i><b>Gauss süreci</b><span>Kalman araç gelişimi · ampirik Bayes</span></div>
+      <div class="layer"><i>04</i><b>Yığınlama regresyonu</b><span>Sıralama → yarış temposu</span></div>
+      <div class="layer"><i>05</i><b>Hiyerarşik lojistik</b><span>Pist bazlı sollama modeli</span></div>
+      <div class="layer"><i>06</i><b>Hiyerarşik büzülme</b><span>Pist parametreleri</span></div>
+      <div class="layer"><i>07</i><b>Start kalibrasyonu</b><span>Grid sırasına göre iteratif</span></div>
+      <div class="layer"><i>08</i><b>Elemeli sıralama</b><span>Q1 · Q2 · Q3</span></div>
+      <div class="layer"><i>09</i><b>Strateji dengesi</b><span>Pit penceresi · undercut savunması</span></div>
+      <div class="layer"><i>10</i><b>Tur tur Monte Carlo</b><span>Vektörize · korelasyonlu belirsizlik</span></div>
+      <div class="layer"><i>11</i><b>İleriye dönük kalibrasyon</b><span>Sızıntısız backtest · log loss</span></div>
+    </div>
+    <p class="note">Doğruluk sonuçları: <b>Model Performansı</b> sekmesi.</p>
   </div></section>
 </main>
-<footer>Bilgi ve analiz amaçlıdır, bahis tavsiyesi değildir. Veri: Jolpica-F1, OpenF1, Open-Meteo. Resmi F1 ürünü değildir.</footer>
+<footer>Bilgi ve analiz amaçlıdır, bahis tavsiyesi değildir. Veri: Jolpica-F1, Open-Meteo. Resmi F1 ürünü değildir.</footer>
 
 <script>
 const $ = s => document.querySelector(s);
@@ -449,6 +427,9 @@ async function loadPerf(){
             ${row('İlk 10 Brier', x=>num(x.brier_top10,4), x=>x.brier_top10)}
             ${row('Favori kazandı', x=>pct(x.fav_won,0), x=>x.fav_won, false)}
             ${row('Kazanan ilk 3 favoride', x=>pct(x.winner_in_top3,0), x=>x.winner_in_top3, false)}
+            ${row('Podyum isabeti', x=>pct(x.podium_hit,0), x=>x.podium_hit, false)}
+            ${row('İlk 10 isabeti', x=>pct(x.top10_hit,0), x=>x.top10_hit, false)}
+            ${row('Takım arkadaşı düellosu', x=>pct(x.h2h_acc,0), x=>x.h2h_acc, false)}
           </tbody></table></div>
           <p class="note">Rastgele tahminin kazanan log loss'u ${num(s1.logloss_uniform,3)}. Yeşil = v2 daha iyi.</p>
           ${m2 ? `<h2 style="margin-top:16px">v2 ayar ızgarası</h2><div class="tablewrap"><table><thead><tr><th class="l">Tempo × / Form ×</th><th>Kazanan LL</th><th>Birleşik LL</th></tr></thead><tbody>
@@ -461,11 +442,23 @@ async function loadPerf(){
           </tbody></table></div></div></div></div>`;
     };
     const rounds = b.v1.rounds;
-    $('#perfBody').innerHTML = `<h1>Model Performansı</h1>
-      <p class="sub">${rounds[0]}–${rounds[rounds.length-1]}. yarışlar; her biri yalnızca kendinden önceki verilerle tahmin edildi (ileriye dönük test, sızıntı yok). Düşük log loss ve Brier daha iyi.</p>
+    const post = b.v2 ? v2best(b.v2.modes.post_quali) : v1best(b.v1.modes.post_quali);
+    const pre = b.v2 ? v2best(b.v2.modes.pre_quali) : v1best(b.v1.modes.pre_quali);
+    const big = (v, label, sub) => `<div class="big"><b>${pct(v,0)}</b><span>${label}${sub?`<br><small>${sub}</small>`:''}</span></div>`;
+    $('#perfBody').innerHTML = `<h1>2026 sezonu doğruluk oranları</h1>
+      <p class="sub">${rounds.length} yarış (${rounds[0]}–${rounds[rounds.length-1]}. yarışlar), her biri yalnızca kendinden önceki verilerle tahmin edildi. Sıralama turu sonrası tahminler:</p>
+      <div class="bigstats">
+        ${big(post.winner_in_top3, 'Kazanan, ilk 3 favori arasında')}
+        ${big(post.fav_won, 'Favori kazandı')}
+        ${big(post.podium_hit, 'Podyum isabeti', 'tahmin edilen ilk 3 ∩ gerçek ilk 3')}
+        ${big(post.top10_hit, 'İlk 10 isabeti')}
+        ${big(post.h2h_acc, 'Takım arkadaşı düellosu', post.h2h_n + ' düello')}
+        ${big(pre.winner_in_top3, 'Sıralama turundan önce: kazanan ilk 3 favoride')}
+      </div>
+      <p class="sub">Ayrıntılı karşılaştırma. Düşük log loss ve Brier daha iyi.</p>
       ${block('Sıralama turundan önce (grid simüle)', 'pre_quali')}
       ${block('Sıralama turundan sonra (gerçek grid)', 'post_quali')}
-      <p class="note">Bilinen sınırlar: ayarlar (tempo/form ölçeği, v1 sıcaklığı) aynı backtest üzerinde seçildiği için seçilen satırlar hafif iyimserdir. v2 pole'dan başlayanın kazanma şansını biraz düşük veriyor (2026'da pole %71 kazandı; model ortalama ~%35 veriyor). Asıl ölçüt ileride Betfair kapanış oranlarıyla karşılaştırma olacak.</p>`;
+      <p class="note">Bilinen sınırlar: ayarlar (tempo/form ölçeği, v1 sıcaklığı) aynı backtest üzerinde seçildiği için seçilen satırlar hafif iyimserdir. v2 pole'dan başlayanın kazanma şansını biraz düşük veriyor. Asıl ölçüt ileride Betfair kapanış oranlarıyla karşılaştırma olacak.</p>`;
   } catch(e){ $('#perfBody').innerHTML = `<div class="err">${esc(e.message)}</div>`; }
 }
 
