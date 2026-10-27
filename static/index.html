@@ -113,6 +113,10 @@ svg text{fill:var(--muted);font-size:11px}
   <section id="tab-race">
     <div class="row">
       <select id="roundSel" aria-label="Yarış"></select>
+      <select id="stageSel" aria-label="Tahmin anı">
+        <option value="">Sıralama sonrası (gerçek grid)</option>
+        <option value="pre">Sıralama öncesi (grid tahmini)</option>
+      </select>
       <span id="raceChips"></span>
     </div>
     <div id="raceBody"><div class="loading">Simülasyon çalışıyor…</div></div>
@@ -222,12 +226,13 @@ async function loadCalendar(){
   state.round = state.cal.next || state.cal.races.filter(r=>r.status==='done').pop().round;
   sel.value = state.round;
   sel.onchange = () => { state.round = +sel.value; loadRace(); };
+  $('#stageSel').onchange = () => { state.stage = $('#stageSel').value; loadRace(); };
 }
 
 async function loadRace(){
   $('#raceBody').innerHTML = '<div class="loading">Simülasyon çalışıyor…</div>';
   try {
-    const p = state.pred = await api('/api/predict?round=' + state.round);
+    const p = state.pred = await api('/api/predict?round=' + state.round + (state.stage ? '&stage=' + state.stage : ''));
     renderRace(p);
     if (!$('#tab-odds').classList.contains('hidden')) buildOddsInput();
   } catch(e){ $('#raceBody').innerHTML = `<div class="err">${esc(e.message)}</div>`; }
@@ -457,6 +462,16 @@ async function loadPerf(){
         ${big(post.h2h_acc, 'Takım arkadaşı düellosu', post.h2h_n + ' düello')}
         ${big(pre.winner_in_top3, 'Sıralama turundan önce: kazanan ilk 3 favoride')}
       </div>
+      ${b.win_calibration && b.win_calibration.post_quali ? (() => { const c = b.win_calibration.post_quali; return `
+      <div class="panel"><h2>Kazanma olasılığı kalibrasyonu (sıralama sonrası)</h2>
+        <div class="tablewrap"><table><tbody>
+          <tr><td class="l">Favori gerçekten kazandı</td><td><b>${pct(c.fav_hit,0)}</b></td></tr>
+          <tr><td class="l">Favoriye verilen ortalama olasılık: kalibrasyondan önce</td><td>${pct(c.fav_prob_raw,0)}</td></tr>
+          <tr><td class="l">Favoriye verilen ortalama olasılık: kalibrasyondan sonra</td><td><b>${pct(c.fav_prob_cal,0)}</b></td></tr>
+          <tr><td class="l">Kazanan log loss (ileriye dönük): önce → sonra</td><td>${num(c.logloss_raw,3)} → <b>${num(c.logloss_cal,3)}</b></td></tr>
+          <tr><td class="l">Kalibrasyon katsayısı k</td><td>${num(c.k_final,2)}</td></tr>
+        </tbody></table></div>
+        <p class="note">Simülasyonlar, kazananın olasılığına göre yeniden ağırlıklandırılır; k yalnızca geçmiş yarışlardan öğrenilir. Favori değişmez, olasılıklar gerçekleşen orana yaklaşır.</p></div>`; })() : ''}
       <p class="sub">Ayrıntılı karşılaştırma. Düşük log loss ve Brier daha iyi.</p>
       ${block('Sıralama turundan önce (grid simüle)', 'pre_quali')}
       ${block('Sıralama turundan sonra (gerçek grid)', 'post_quali')}

@@ -89,7 +89,8 @@ def event_slugs(season: int) -> list[str]:
 
     Etkinlik sayfaları belge listesini JavaScript ile yüklediği için PDF adresleri doğrudan
     kalıptan kurulur: {sezon}_{etkinlik}_-_free_practice_{n}_classification.pdf
-    Liste en yeni sezonla başlar; ilk tekrar eden ad önceki sezona geçildiğini gösterir.
+    Liste en yeni sezonla başlar; güncel sezonda ilk tekrar eden ad önceki sezona geçildiğini gösterir.
+    Geçmiş sezonlar için tüm adlar denenir (404'ler hatırlanır).
     """
     html = _get(INDEX).decode("utf-8", "ignore")
     slugs = [m.group(0).split("/")[-1].split("_-_")[0][5:]
@@ -98,7 +99,9 @@ def event_slugs(season: int) -> list[str]:
     for name in re.findall(r'href="/decision-document-list/nojs/\d+"[^>]*>\s*([^<]*Grand Prix[^<]*)</a>', html):
         name = name.strip()
         if name in seen:
-            break
+            if season == data.CURRENT_SEASON:
+                break
+            continue
         seen.add(name)
         base = unicodedata.normalize("NFKD", name).encode("ascii", "ignore").decode().lower()
         slugs += [base.replace(" ", "_"), base.replace(" ", "_").replace("-", "_")]

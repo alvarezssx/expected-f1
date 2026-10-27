@@ -15,7 +15,8 @@ Formula 1 yarış tahmin ve oran analiz motoru. Her tahmin, tur tur koşturulan 
 | Podyum isabeti (tahmin edilen ilk 3 ∩ gerçek ilk 3) | **%62** |
 | İlk 10 isabeti | **%79** |
 | Takım arkadaşı düellosu (kim önde bitirir) | **%72** (164 düello) |
-| Kazanan log loss (rastgele tahmin: 3.09, düşük = iyi) | **1.19** |
+| Kazanan log loss (rastgele tahmin: 3.09, düşük = iyi) | **1.14** (kalibrasyonlu) |
+| Favoriye verilen ortalama kazanma olasılığı | **%55** (kalibrasyondan önce %38) |
 
 ### Sıralama turundan önce (grid de tahmin ediliyor, FIA antrenman sonuçlarıyla)
 

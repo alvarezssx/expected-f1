@@ -20,7 +20,7 @@ Her simülasyon (hepsi vektörize, aynı anda):
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 
 import numpy as np
 
@@ -91,6 +91,23 @@ class RaceSim:
     leader_by_lap: np.ndarray | None = None  # (N, L) her tur sonundaki lider (teşhis için)
     status: np.ndarray | None = None         # (N, L) 0 yeşil, 1 SC, 2 VSC
     pit_by_lap: np.ndarray | None = None     # (N, D, L) teşhis modu
+
+    def win_probs(self) -> np.ndarray:
+        return np.mean(self.positions == 1, axis=0)
+
+    def calibrated(self, k: float, seed: int = 0) -> "RaceSim":
+        """Kazanma olasılığı kalibrasyonu: her simülasyon, kazananının olasılığının (k-1). kuvvetiyle
+        ağırlıklandırılıp yeniden örneklenir. Sonuçta kazanma olasılıkları p^k ile orantılı olur;
+        podyum, ilk 10 vb. aynı örneklerden geldiği için tüm piyasalar tutarlı kalır."""
+        if abs(k - 1.0) < 1e-9:
+            return self
+        p = np.clip(self.win_probs(), 1e-6, None)
+        w = p[np.argmin(self.positions, axis=1)] ** (k - 1.0)
+        n = len(w)
+        idx = np.random.default_rng(seed).choice(n, size=n, replace=True, p=w / w.sum())
+        vals = {f.name: (getattr(self, f.name)[idx] if getattr(self, f.name) is not None else None)
+                for f in fields(self)}
+        return RaceSim(**vals)
 
 
 def _mvn(rng, mean, cov, n):

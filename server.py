@@ -83,7 +83,10 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"races": ENGINE.calendar_view(), "next": ENGINE.next_round(), "temps": ENGINE.temps})
             elif url.path == "/api/predict":
                 rnd = _round(q.get("round") or ENGINE.next_round() or max(ENGINE.done))
-                self._json(ENGINE.predict(rnd))
+                stage = q.get("stage", "")
+                if stage not in ("", "pre"):
+                    raise BadRequest("bilinmeyen tahmin anı")
+                self._json(ENGINE.predict(rnd, "simulated" if stage == "pre" else "auto"))
             elif url.path == "/api/backtest":
                 self._json(ENGINE.backtest())
             elif url.path == "/api/championship":

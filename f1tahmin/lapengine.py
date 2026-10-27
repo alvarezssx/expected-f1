@@ -13,7 +13,10 @@ from .racesim import Inputs, simulate
 from .track import build_track_params, fit_overtake, start_profile, team_pit_effects
 
 SEASONS = [2023, 2024, 2025, data.CURRENT_SEASON]
-FP_WEIGHTS = {"FP1": 1.0, "FP2": 1.5, "FP3": 2.0}  # geç seanslar sıralama/yarış programına daha yakın
+FP_WEIGHTS = {"FP1": 1.0, "FP2": 1.5, "FP3": 2.0}  # eski yöntem: sabit seans ağırlıkları
+SESSIONS = ("FP1", "FP2", "FP3")
+FRIDAY = ("FP1", "FP2")       # Cuma akşamı tahmini: yalnızca Cuma seansları
+TEAM_BIAS_K = 3.0              # takım sapması öncülü: ~3 yarışlık sıfıra çekme
 
 
 class LapEngine:
@@ -41,6 +44,12 @@ class LapEngine:
         self._gp_cache: dict = {}
         self._wf_errors: dict[int, list[tuple[float, float]]] = {}
         self._fp_rows_cache: dict = {}
+        self._fp_link_cache: dict = {}
+        # Öğrenilmiş seans ağırlıkları ve takım sapması 2026 A/B testinde (15 yarış, ileriye dönük)
+        # görülmemiş yarışlardaki hatayı artırdı (sıralama RMSE 0.475% -> 0.483% / 0.493%); kapalı.
+        # Daha fazla veri birikince yeniden test edilebilir.
+        self.fp_learned = False
+        self.fp_team_bias = False
 
     def _gps(self, rnd: int):
         """rnd'den ÖNCEKİ veriyle kurulan yarış ve sıralama GP'leri (önbellekli)."""
@@ -54,61 +63,135 @@ class LapEngine:
     # Antrenman (FIA FP sınıflandırmaları) -> sıralama öncesi tahmin
     # ------------------------------------------------------------------ #
 
-    def fp_pct(self, rnd: int) -> dict[str, float]:
-        """Sürücünün antrenman temposu: her seansta seans medyanına göre % fark, seans ağırlıklı ortalama."""
-        sessions = self.fp.get(rnd, {})
-        acc: dict[str, list[tuple[float, float]]] = {}
-        for sess, times in sessions.items():
+    def session_gaps(self, rnd: int) -> dict[str, dict[str, float]]:
+        """Her antrenman seansında sürücünün seans medyanına göre % farkı (negatif = hızlı)."""
+        out = {}
+        for sess, times in self.fp.get(rnd, {}).items():
             if len(times) < 10:
                 continue
             ref = float(np.median(list(times.values())))
-            for d, t in times.items():
-                g = 100 * (t - ref) / ref
-                if abs(g) < 4:  # sorunlu seans / yarım program
-                    acc.setdefault(d, []).append((g, FP_WEIGHTS.get(sess, 1.0)))
-        return {d: float(np.average([g for g, _ in v], weights=[w for _, w in v])) for d, v in acc.items()}
+            g = {d: 100 * (t - ref) / ref for d, t in times.items()}
+            out[sess] = {d: v for d, v in g.items() if abs(v) < 4}  # sorunlu seans / yarım program
+        return out
 
-    def _fp_rows(self, r: int) -> list[tuple[float, float, float, float, float]]:
-        """r yarışı için (gerçek yarış, GP yarış, GP sıralama, gerçek sıralama, antrenman) — GP'ler yalnızca öncesiyle."""
+    @staticmethod
+    def _features(gaps: dict[str, float], sessions: tuple[str, ...]):
+        """Seans değişkenleri (eksik seans, sürücünün eldeki seanslarının ortalamasıyla) ve sabit ağırlıklı ortalama."""
+        vals = [gaps.get(s) for s in sessions]
+        avail = [v for v in vals if v is not None]
+        if not avail:
+            return None, None
+        fill = float(np.mean(avail))
+        w = [(gaps[s], FP_WEIGHTS[s]) for s in sessions if s in gaps]
+        old = float(np.average([g for g, _ in w], weights=[x for _, x in w]))
+        return [fill if v is None else v for v in vals], old
+
+    def fp_pct(self, rnd: int, sessions: tuple[str, ...] = SESSIONS) -> dict[str, float]:
+        """Sabit ağırlıklı antrenman temposu (gösterim ve eski yöntem için)."""
+        by_driver: dict[str, dict[str, float]] = {}
+        for sess, g in self.session_gaps(rnd).items():
+            for d, v in g.items():
+                by_driver.setdefault(d, {})[sess] = v
+        out = {}
+        for d, gaps in by_driver.items():
+            _, old = self._features(gaps, sessions)
+            if old is not None:
+                out[d] = old
+        return out
+
+    def _fp_rows(self, r: int) -> list[dict]:
+        """r yarışı için sürücü satırları: gerçek yarış/sıralama temposu, GP tahminleri (yalnızca öncesiyle),
+        takım ve seans farkları."""
         if r in self._fp_rows_cache:
             return self._fp_rows_cache[r]
-        fp = self.fp_pct(r)
+        sg = self.session_gaps(r)
         out = []
         cur = [f for f in self.feats if f["season"] == data.CURRENT_SEASON]
         f_r = next((f for f in cur if f["round"] == r), None)
         qp = self._quali_pct(r)
         hit = next((q for q in self.quali if int(q["round"]) == r), None)
-        if fp and hit and len([f for f in cur if f["round"] < r]) >= 3:
+        if sg and hit and len([f for f in cur if f["round"] < r]) >= 3:
             gp_r, gp_q, _ = self._gps(r)
             team = {x["Driver"]["driverId"]: x["Constructor"]["constructorId"] for x in hit["QualifyingResults"]}
-            ents = [(d, team[d]) for d in fp if d in team]
-            if ents:
+            drivers = sorted({d for g in sg.values() for d in g if d in team})
+            if drivers:
+                ents = [(d, team[d]) for d in drivers]
                 mr, _ = gp_r.predict(ents, r)
                 mq, _ = gp_q.predict(ents, r)
-                for (d, _), a, b in zip(ents, mr, mq):
+                for (d, t), a, b in zip(ents, mr, mq):
                     p = f_r["pace"].get(d) if f_r else None
                     y = 100 * p["alpha"] / f_r["ref"] if p and p["n"] >= 8 else np.nan
-                    out.append((y, float(a), float(b), qp.get(d, np.nan), fp[d]))
+                    out.append({"round": r, "driver": d, "team": t, "y": y, "gr": float(a), "gq": float(b),
+                                "qo": qp.get(d, np.nan),
+                                "gaps": {s: g[d] for s, g in sg.items() if d in g}})
         self._fp_rows_cache[r] = out
         return out
 
-    def fp_link(self, rnd: int) -> dict | None:
-        """Yığınlama: sıralama ≈ a·GP_sıralama + b·antrenman + c  ve  yarış ≈ a'·GP_yarış + b'·antrenman + c'.
-        Katsayılar ve belirsizlik daralması yalnızca rnd'den önceki yarışlardan."""
-        rows = np.array([p for r in range(4, rnd) for p in self._fp_rows(r)])
-        if len(rows) < 60:
+    def fp_link(self, rnd: int, sessions: tuple[str, ...] = SESSIONS,
+                learned: bool = True, team_bias: bool = True) -> dict | None:
+        """Antrenman -> sıralama / yarış temposu yığınlaması (yalnızca rnd'den önceki yarışlardan öğrenilir).
+
+        learned=True:  hedef ≈ a·GP + Σ b_s·seans_s + c   (seans ağırlıkları veriden)
+        learned=False: hedef ≈ a·GP + b·sabit_ağırlıklı_ortalama + c
+        team_bias:     regresyon artığının takım ortalaması, az verili takım sıfıra çekilerek (her takımın
+                       antrenmanda tempo saklama / gösterme alışkanlığı)
+        """
+        key = (rnd, sessions, learned, team_bias)
+        if key in self._fp_link_cache:
+            return self._fp_link_cache[key]
+        rows = []
+        for r in range(4, rnd):
+            for row in self._fp_rows(r):
+                feats, old = self._features(row["gaps"], sessions)
+                if feats is not None:
+                    rows.append((row, feats if learned else [old]))
+        result = None
+        if len(rows) >= 60:
+            result = {"n": len(rows), "sessions": list(sessions), "learned": learned}
+            for key_t, tcol, bcol in (("quali", "qo", "gq"), ("race", "y", "gr")):
+                sel = [(r, f) for r, f in rows if np.isfinite(r[tcol])]
+                target = np.array([r[tcol] for r, _ in sel])
+                base = np.array([r[bcol] for r, _ in sel])
+                X = np.column_stack([base, np.array([f for _, f in sel]), np.ones(len(sel))])
+                ridge = np.diag([1e-3] * (X.shape[1] - 1) + [0.0])
+                coef = np.linalg.solve(X.T @ X + ridge, X.T @ target)
+                resid = target - X @ coef
+                bias = {}
+                if team_bias:
+                    per: dict[str, dict[int, list[float]]] = {}
+                    for (r, _), e in zip(sel, resid):
+                        per.setdefault(r["team"], {}).setdefault(r["round"], []).append(e)
+                    for t, by_r in per.items():
+                        means = [float(np.mean(v)) for v in by_r.values()]
+                        bias[t] = float(np.sum(means) / (len(means) + TEAM_BIAS_K))
+                    resid = resid - np.array([bias.get(r["team"], 0.0) for r, _ in sel])
+                mse_s = float(np.mean(resid ** 2))
+                mse_g = float(np.mean((target - base) ** 2))
+                result[key_t] = {"coef": [float(c) for c in coef], "team_bias": bias,
+                                 "var_ratio": float(np.clip(mse_s / mse_g, 0.2, 1.0)),
+                                 "rmse_gp": mse_g ** 0.5, "rmse_stack": mse_s ** 0.5}
+        self._fp_link_cache[key] = result
+        return result
+
+    def fp_predict(self, rnd: int, entries, q_mean, r_mean, sessions, learned, team_bias):
+        """Antrenman bilgisiyle güncellenmiş sıralama ve yarış temposu; antrenmanı olmayan sürücü GP'de kalır."""
+        fl = self.fp_link(rnd, sessions, learned, team_bias)
+        sg = self.session_gaps(rnd)
+        if not fl or not any(s in sg for s in sessions):
             return None
-        y, gr, gq, qo, fp = rows.T
-        out = {"n": len(rows)}
-        for key, target, base in (("quali", qo, gq), ("race", y, gr)):
-            m = np.isfinite(target)
-            X = np.column_stack([base[m], fp[m], np.ones(m.sum())])
-            coef = np.linalg.solve(X.T @ X + np.diag([1e-3, 1e-3, 0]), X.T @ target[m])
-            mse_s = float(np.mean((target[m] - X @ coef) ** 2))
-            mse_g = float(np.mean((target[m] - base[m]) ** 2))
-            out[key] = {"coef": [float(c) for c in coef], "var_ratio": float(np.clip(mse_s / mse_g, 0.2, 1.0)),
-                        "rmse_gp": mse_g ** 0.5, "rmse_stack": mse_s ** 0.5}
-        return out
+        q_new, r_new = q_mean.copy(), r_mean.copy()
+        n = 0
+        for j, e in enumerate(entries):
+            gaps = {s: sg[s][e.driver] for s in sessions if s in sg and e.driver in sg[s]}
+            feats, old = self._features(gaps, sessions)
+            if feats is None:
+                continue
+            f = feats if learned else [old]
+            n += 1
+            for key_t, arr, base in (("quali", q_new, q_mean[j]), ("race", r_new, r_mean[j])):
+                c = fl[key_t]["coef"]
+                arr[j] = c[0] * base + float(np.dot(c[1:-1], f)) + c[-1] + fl[key_t]["team_bias"].get(e.team, 0.0)
+        return q_new, r_new, fl, n
 
     # ------------------------------------------------------------------ #
     # Sıralama turu -> yarış temposu bağlantısı (ileriye dönük hatalardan)
@@ -178,7 +261,8 @@ class LapEngine:
         return self._ot_cache[rnd]
 
     def build(self, rnd: int, circuit: str, entries, known_grid: list[str] | None,
-              rain_prob: float, pace_scale: float = 1.0, form_scale: float = 1.0) -> tuple[Inputs, dict]:
+              rain_prob: float, pace_scale: float = 1.0, form_scale: float = 1.0,
+              fp_sessions: tuple[str, ...] = SESSIONS) -> tuple[Inputs, dict]:
         cur_feats = [f for f in self.feats if f["season"] == data.CURRENT_SEASON]
         gp_r, gp_q, q_sigma = self._gps(rnd)
 
@@ -194,19 +278,14 @@ class LapEngine:
 
         # Sıralama turundan önce: antrenman temposu o hafta sonu aracın hızı hakkında kanıttır.
         fp_used = None
-        fpp = self.fp_pct(rnd) if (self.use_fp and not known_grid) else {}
-        if fpp:
-            fl = self.fp_link(rnd)
-            if fl:
-                fq = np.array([fpp.get(e.driver, np.nan) for e in entries])
-                have = np.isfinite(fq)
-                a, b, c = fl["quali"]["coef"]
-                q_mean = np.where(have, a * q_mean + b * np.nan_to_num(fq) + c, q_mean)
-                a, b, c = fl["race"]["coef"]
-                r_mean = np.where(have, a * r_mean + b * np.nan_to_num(fq) + c, r_mean)
+        if self.use_fp and not known_grid:
+            got = self.fp_predict(rnd, entries, q_mean, r_mean, fp_sessions, self.fp_learned, self.fp_team_bias)
+            if got:
+                q_mean, r_mean, fl, n_fp = got
                 q_cov, quali_tau = q_cov * fl["quali"]["var_ratio"], quali_tau * np.sqrt(fl["quali"]["var_ratio"])
                 r_cov, race_tau = r_cov * fl["race"]["var_ratio"], race_tau * np.sqrt(fl["race"]["var_ratio"])
-                fp_used = {**fl, "sessions": sorted(self.fp.get(rnd, {})), "drivers": int(have.sum())}
+                fp_used = {**fl, "sessions": sorted(s for s in self.fp.get(rnd, {}) if s in fp_sessions),
+                           "drivers": n_fp}
 
         # Sıralama turu bittiyse: gerçek sıralama temposu, o hafta sonunun yarış temposu hakkında kanıttır.
         #   E[yarış | sıralama] = c_gp·GP + c_q·gözlenen_sıralama + c0  (ileriye dönük yığınlama),
@@ -262,6 +341,7 @@ class LapEngine:
         }
         return inp, meta
 
-    def run(self, rnd, circuit, entries, known_grid, rain_prob, n=20000, seed=0, pace_scale=1.0, form_scale=1.0):
-        inp, meta = self.build(rnd, circuit, entries, known_grid, rain_prob, pace_scale, form_scale)
+    def run(self, rnd, circuit, entries, known_grid, rain_prob, n=20000, seed=0, pace_scale=1.0, form_scale=1.0,
+            fp_sessions=SESSIONS):
+        inp, meta = self.build(rnd, circuit, entries, known_grid, rain_prob, pace_scale, form_scale, fp_sessions)
         return simulate(inp, n=n, seed=seed), meta

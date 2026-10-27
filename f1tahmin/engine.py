@@ -14,7 +14,7 @@ import threading
 import numpy as np
 
 from . import data, fia, laps, odds
-from .lapengine import LapEngine
+from .lapengine import FRIDAY, SESSIONS, LapEngine
 from .model import fit_season, reliability, track_stats
 from .simulate import POINTS, Entry, SimResult, simulate, summarize, market_probs
 
@@ -22,7 +22,7 @@ SPRINT_POINTS = np.array([8, 7, 6, 5, 4, 3, 2, 1] + [0] * 30)
 # v2 kalibrasyon ızgarası: (tempo ölçeği, form ölçeği)
 V2_GRID = [(s, f) for s in (0.8, 1.0, 1.25) for f in (0.0, 0.35, 0.7)]
 V2_CACHE = data.CACHE / "backtest_v2.json"
-V2_VERSION = 11  # simülatör/model kodu değişince artır: diskteki backtest geçersiz olur
+V2_VERSION = 14  # simülatör/model kodu değişince artır: diskteki backtest geçersiz olur
 
 
 class Engine:
@@ -57,10 +57,18 @@ class Engine:
                       "post": bt["modes"]["post_quali"]["best_temperature"]}
         # v2 kalibrasyonu: tempo ve form ölçeği (diskte saklanır; yeni veri gelince yeniden hesaplanır)
         self.v2_params = {"pre": (1.0, 1.0), "post": (1.0, 1.0)}
+        self.win_k = {"pre": 1.0, "post": 1.0}
+        self.win_calib = {}
         bt2 = self.backtest_v2()
         if bt2:
             self.v2_params = {"pre": tuple(bt2["modes"]["pre_quali"]["best"]),
                               "post": tuple(bt2["modes"]["post_quali"]["best"])}
+            # kazanma olasılığı kalibrasyonu: seçilen ayarın yarış yarış olasılıklarından
+            for stage, mode in (("pre", "pre_quali"), ("post", "post_quali")):
+                m = bt2["modes"][mode]
+                rounds = _best_entry(m)["per_round"]
+                self.win_k[stage] = _fit_win_k(rounds)
+                self.win_calib[mode] = _walk_forward_win_calib(rounds)
 
     # ------------------------------------------------------------------ #
 
@@ -100,12 +108,13 @@ class Engine:
         return [x["Driver"]["driverId"] for x in sorted(hit["QualifyingResults"], key=lambda x: int(x["position"]))]
 
     def _grid_for(self, round_: int, grid_mode: str) -> list[str] | None:
-        if grid_mode == "actual":  # backtest: gerçek start gridi
+        # "actual" ve bitmiş yarışta "auto": gerçek start gridi (cezalar dahil)
+        if grid_mode == "actual" or (grid_mode == "auto" and round_ in self.done):
             res = next(r for r in self.races if r["round"] == round_)["results"]
             return [x["driver"] for x in sorted(res, key=lambda x: x["grid"] or 99)]
-        if grid_mode == "auto" and round_ not in self.done:
+        if grid_mode == "auto":  # yaklaşan yarış: sıralama yapıldıysa sonucu
             return self._quali_order(round_)
-        return None
+        return None  # "simulated": sıralama öncesi görünüm, grid simüle edilir
 
     def _weather(self, round_: int, rain_prob: float | None):
         if rain_prob is not None:
@@ -130,17 +139,26 @@ class Engine:
         return sim, race_r, quali_r, rel, weather, known_grid
 
     def _run_v2(self, round_: int, grid_mode: str = "auto", n_sims: int = 20000,
-                params: tuple[float, float] | None = None, rain_prob: float | None = None, seed: int | None = None):
-        """v2: tur tur simülatör. RaceSim, meta, hava, grid ve v1 biçimli özet nesnesi döner."""
+                params: tuple[float, float] | None = None, rain_prob: float | None = None, seed: int | None = None,
+                calibrate: bool = True):
+        """v2: tur tur simülatör. RaceSim, meta, hava, grid ve v1 biçimli özet nesnesi döner.
+
+        grid_mode "friday": Cuma akşamı tahmini — grid simüle edilir, yalnızca FP1 + FP2 kullanılır.
+        calibrate: kazanma olasılığı kalibrasyonu (backtest kendi koşularında kapatır)."""
         info = self.race_info(round_)
         entries = self.entries_for(round_)
         known_grid = self._grid_for(round_, grid_mode)
+        stage = "post" if known_grid else ("friday" if grid_mode == "friday" else "pre")
         if params is None:
-            params = self.v2_params["post" if known_grid else "pre"]
+            params = self.v2_params.get(stage, self.v2_params["pre"])
         weather, rain_prob = self._weather(round_, rain_prob)
         rs, meta = self.lap.run(round_, info["Circuit"]["circuitId"], entries, known_grid, rain_prob,
                                 n=n_sims, seed=round_ if seed is None else seed,
-                                pace_scale=params[0], form_scale=params[1])
+                                pace_scale=params[0], form_scale=params[1],
+                                fp_sessions=FRIDAY if stage == "friday" else SESSIONS)
+        k = self.win_k.get("post" if known_grid else "pre", 1.0) if calibrate else 1.0
+        rs = rs.calibrated(k, seed=round_)
+        meta["win_k"] = k
         v1like = SimResult(entries, rs.positions, rs.grid, rs.dnf, rs.sc_count > 0, rs.rain)
         return rs, meta, weather, known_grid, v1like
 
@@ -162,9 +180,10 @@ class Engine:
                 rs, meta, weather, known_grid, sim = self._run_v2(round_, grid_mode)
                 out = summarize(sim)
                 out.update(_v2_extras(rs, sim.entries, meta))
-                ps, fs = self.v2_params["post" if known_grid else "pre"]
+                stage = "post" if known_grid else ("friday" if grid_mode == "friday" else "pre")
+                ps, fs = self.v2_params.get(stage, self.v2_params["pre"])
                 out["meta"] = {**base_meta, "model": "v2", "grid_known": bool(known_grid), "weather": weather,
-                               "pace_scale": ps, "form_scale": fs, "v2": meta}
+                               "stage": stage, "pace_scale": ps, "form_scale": fs, "v2": meta}
             else:
                 sim, race_r, _, rel, weather, known_grid = self._run(round_, grid_mode)
                 out = summarize(sim)
@@ -205,7 +224,8 @@ class Engine:
             ll = -math.log(max(p_win[winner], 1e-4))
             stats["logloss"].append(ll)
             stats["per_round"].append({"round": rd, "logloss": ll, "p_winner": float(p_win[winner]),
-                                       "winner": drivers[winner], "favourite": drivers[int(np.argmax(p_win))]})
+                                       "winner": drivers[winner], "favourite": drivers[int(np.argmax(p_win))],
+                                       "p_win": [round(float(x), 5) for x in p_win], "winner_idx": winner})
             stats["ll_place"].append(_binary_ll(p_pod, actual <= 3) + _binary_ll(p_t10, actual <= 10))
             stats["brier_win"].append(float(np.mean((p_win - (actual == 1)) ** 2)))
             stats["brier_podium"].append(float(np.mean((p_pod - (actual <= 3)) ** 2)))
@@ -289,7 +309,8 @@ class Engine:
             for params in V2_GRID:
                 runs = []
                 for rd in rounds:
-                    rs, _, _, _, sim = self._run_v2(rd, grid_mode, n_sims=n_sims, params=params, rain_prob=0.0)
+                    rs, _, _, _, sim = self._run_v2(rd, grid_mode, n_sims=n_sims, params=params, rain_prob=0.0,
+                                                    calibrate=False)
                     runs.append((rd, [e.driver for e in sim.entries], rs.positions))
                 per[params] = self._score(runs)
                 print(f"  {mode} tempo×{params[0]} form×{params[1]}: log loss {per[params]['logloss']:.3f}, "
@@ -302,7 +323,8 @@ class Engine:
         return out
 
     def backtest(self) -> dict:
-        return {"v1": self._bt_v1, "v2": getattr(self, "_bt_v2", None)}
+        return {"v1": self._bt_v1, "v2": getattr(self, "_bt_v2", None),
+                "win_calibration": {"k": self.win_k, **self.win_calib}}
 
     # ------------------------------------------------------------------ #
     # Şampiyonluk: kalan yarışları simüle et, mevcut puanlara ekle
@@ -386,6 +408,48 @@ def _v2_extras(rs, entries, meta) -> dict:
             "finishers_dist": {str(k): float(np.mean(finishers == k)) for k in range(max(int(finishers.min()), D - 6), D + 1)},
         },
     }
+
+
+WIN_K_GRID = np.arange(1.0, 4.01, 0.25)
+
+
+def _best_entry(mode: dict) -> dict:
+    return next(v for k, v in mode["by_params"].items()
+                if [float(x) for x in k.split("|")] == [float(x) for x in mode["best"]])
+
+
+def _win_ll(rounds: list[dict], k: float) -> float:
+    """Kazanma olasılıkları p^k ile yeniden ölçeklenince gerçek kazananın ortalama log loss'u."""
+    out = []
+    for r in rounds:
+        p = np.clip(np.array(r["p_win"]), 1e-4, None) ** k
+        out.append(-np.log(p[r["winner_idx"]] / p.sum()))
+    return float(np.mean(out))
+
+
+def _fit_win_k(rounds: list[dict], min_rounds: int = 5) -> float:
+    """Kazanma kalibrasyon katsayısı k (1 = değişiklik yok, >1 = favoriler güçlenir).
+    Az veride 1'e yakın kalması için hafif bir öncül: (k-1)² cezası."""
+    if len(rounds) < min_rounds:
+        return 1.0
+    return float(min(WIN_K_GRID, key=lambda k: _win_ll(rounds, k) + 0.02 * (k - 1) ** 2))
+
+
+def _walk_forward_win_calib(rounds: list[dict]) -> dict:
+    """İleriye dönük değerlendirme: her yarış için k yalnızca önceki yarışlardan."""
+    raw, cal, fav_p_raw, fav_p_cal = [], [], [], []
+    for i, r in enumerate(rounds):
+        k = _fit_win_k(rounds[:i])
+        p = np.clip(np.array(r["p_win"]), 1e-4, None)
+        pk = p ** k / np.sum(p ** k)
+        raw.append(-np.log(p[r["winner_idx"]] / p.sum()))
+        cal.append(-np.log(pk[r["winner_idx"]]))
+        fav_p_raw.append(float(p.max() / p.sum()))
+        fav_p_cal.append(float(pk.max()))
+    fav_hit = float(np.mean([r["favourite"] == r["winner"] for r in rounds]))
+    return {"logloss_raw": float(np.mean(raw)), "logloss_cal": float(np.mean(cal)),
+            "fav_prob_raw": float(np.mean(fav_p_raw)), "fav_prob_cal": float(np.mean(fav_p_cal)),
+            "fav_hit": fav_hit, "k_final": _fit_win_k(rounds)}
 
 
 def _binary_ll(p: np.ndarray, y: np.ndarray) -> float:
