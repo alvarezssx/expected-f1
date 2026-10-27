@@ -165,20 +165,21 @@ svg text{fill:var(--muted);font-size:11px}
       <div class="big"><b>88</b><span>yarış (2023–2026)</span></div>
       <div class="big"><b>26.000+</b><span>sollama denemesi</span></div>
       <div class="big"><b>3.200+</b><span>pit stop</span></div>
-      <div class="big"><b>11</b><span>model katmanı</span></div>
+      <div class="big"><b>12</b><span>model katmanı</span></div>
     </div>
     <div class="layers">
       <div class="layer"><i>01</i><b>Robust tur regresyonu</b><span>Huber · yakıt · lastik · kirli hava</span></div>
       <div class="layer"><i>02</i><b>Olay tespiti</b><span>Güvenlik aracı · VSC · kırmızı bayrak</span></div>
       <div class="layer"><i>03</i><b>Gauss süreci</b><span>Kalman araç gelişimi · ampirik Bayes</span></div>
-      <div class="layer"><i>04</i><b>Yığınlama regresyonu</b><span>Sıralama → yarış temposu</span></div>
-      <div class="layer"><i>05</i><b>Hiyerarşik lojistik</b><span>Pist bazlı sollama modeli</span></div>
-      <div class="layer"><i>06</i><b>Hiyerarşik büzülme</b><span>Pist parametreleri</span></div>
-      <div class="layer"><i>07</i><b>Start kalibrasyonu</b><span>Grid sırasına göre iteratif</span></div>
-      <div class="layer"><i>08</i><b>Elemeli sıralama</b><span>Q1 · Q2 · Q3</span></div>
-      <div class="layer"><i>09</i><b>Strateji dengesi</b><span>Pit penceresi · undercut savunması</span></div>
-      <div class="layer"><i>10</i><b>Tur tur Monte Carlo</b><span>Vektörize · korelasyonlu belirsizlik</span></div>
-      <div class="layer"><i>11</i><b>İleriye dönük kalibrasyon</b><span>Sızıntısız backtest · log loss</span></div>
+      <div class="layer"><i>04</i><b>Yığınlama regresyonu</b><span>Antrenman → sıralama · sıralama → yarış</span></div>
+      <div class="layer"><i>05</i><b>FIA antrenman verisi</b><span>FP1 · FP2 · FP3 sınıflandırmaları</span></div>
+      <div class="layer"><i>06</i><b>Hiyerarşik lojistik</b><span>Pist bazlı sollama modeli</span></div>
+      <div class="layer"><i>07</i><b>Hiyerarşik büzülme</b><span>Pist parametreleri</span></div>
+      <div class="layer"><i>08</i><b>Start kalibrasyonu</b><span>Grid sırasına göre iteratif</span></div>
+      <div class="layer"><i>09</i><b>Elemeli sıralama</b><span>Q1 · Q2 · Q3</span></div>
+      <div class="layer"><i>10</i><b>Strateji dengesi</b><span>Pit penceresi · undercut savunması</span></div>
+      <div class="layer"><i>11</i><b>Tur tur Monte Carlo</b><span>Vektörize · korelasyonlu belirsizlik</span></div>
+      <div class="layer"><i>12</i><b>İleriye dönük kalibrasyon</b><span>Sızıntısız backtest · log loss</span></div>
     </div>
     <p class="note">Doğruluk sonuçları: <b>Model Performansı</b> sekmesi.</p>
   </div></section>
@@ -238,6 +239,7 @@ function renderRace(p){
   $('#raceChips').innerHTML = [
     m.grid_known ? '<span class="chip good">Grid belli (sıralama turu bitti)</span>' : '<span class="chip">Grid simüle ediliyor</span>',
     done ? '<span class="chip red">Geçmiş yarış: model yalnızca öncesini gördü</span>' : '',
+    m.v2 && m.v2.fp_link ? `<span class="chip good">Antrenman verisi: ${m.v2.fp_link.sessions.map(esc).join(', ')}</span>` : '',
   ].join(' ');
   const w = m.weather;
   const maxWin = Math.max(...p.drivers.map(d=>d.win));

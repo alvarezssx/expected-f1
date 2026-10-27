@@ -13,7 +13,7 @@ import threading
 
 import numpy as np
 
-from . import data, laps, odds
+from . import data, fia, laps, odds
 from .lapengine import LapEngine
 from .model import fit_season, reliability, track_stats
 from .simulate import POINTS, Entry, SimResult, simulate, summarize, market_probs
@@ -22,7 +22,7 @@ SPRINT_POINTS = np.array([8, 7, 6, 5, 4, 3, 2, 1] + [0] * 30)
 # v2 kalibrasyon ızgarası: (tempo ölçeği, form ölçeği)
 V2_GRID = [(s, f) for s in (0.8, 1.0, 1.25) for f in (0.0, 0.35, 0.7)]
 V2_CACHE = data.CACHE / "backtest_v2.json"
-V2_VERSION = 10  # simülatör/model kodu değişince artır: diskteki backtest geçersiz olur
+V2_VERSION = 11  # simülatör/model kodu değişince artır: diskteki backtest geçersiz olur
 
 
 class Engine:
@@ -41,10 +41,14 @@ class Engine:
         self._pred_cache: dict = {}
         self._sims: dict = {}
         self._backtest = None
-        if refresh:  # yeni biten yarışların tur verisini indir
+        if refresh:  # yeni biten yarışların tur verisini ve FIA antrenman sonuçlarını indir
             have = set(laps.available(data.CURRENT_SEASON))
             for rd in sorted(self.done - have):
                 laps.fetch_race(data.CURRENT_SEASON, rd)
+            try:
+                fia.fetch_season(data.CURRENT_SEASON, refresh=True)
+            except Exception as e:  # FIA erişilemezse eldeki antrenman verisiyle devam
+                print(f"FIA antrenman verisi alınamadı: {type(e).__name__}", flush=True)
         self.lap = LapEngine(self.races, self.ts)
         # v1 kalibrasyonu: birleşik log loss'u en düşük sıcaklık
         self.temps = {"pre": 1.0, "post": 1.0}
@@ -264,7 +268,9 @@ class Engine:
         return self._bt_v1
 
     def _v2_signature(self) -> str:
-        return json.dumps({"cov": self.lap.coverage(), "done": sorted(self.done), "grid": V2_GRID, "v": V2_VERSION})
+        fp_cov = {r: sorted(s) for r, s in sorted(self.lap.fp.items())} if self.lap.use_fp else {}
+        return json.dumps({"cov": self.lap.coverage(), "done": sorted(self.done), "grid": V2_GRID,
+                           "fp": fp_cov, "v": V2_VERSION})
 
     def backtest_v2(self, n_sims: int = 3000, force: bool = False) -> dict | None:
         rounds = self._bt_rounds()

@@ -250,7 +250,9 @@ def simulate(inp: Inputs, n: int = 20000, seed: int = 0, debug: bool = False) ->
         o_prev = np.argsort(cum, axis=1)
         c_sorted = np.take_along_axis(cum, o_prev, 1)
         behind_pit = np.zeros((n, D), bool)
-        bp = np.take_along_axis(pit_prev, o_prev[:, 1:], 1) & ((c_sorted[:, 1:] - c_sorted[:, :-1]) < COVER_GAP + tp.pit_green)
+        with np.errstate(invalid="ignore"):  # çekilmiş araçlar: inf - inf
+            close = (c_sorted[:, 1:] - c_sorted[:, :-1]) < COVER_GAP + tp.pit_green
+        bp = np.take_along_axis(pit_prev, o_prev[:, 1:], 1) & close
         behind_pit[rows, o_prev[:, :-1]] = bp
         cover = alive & green[:, None] & behind_pit & (nxt - i <= COVER_WINDOW) & (rng.random((n, D)) < COVER_PROB)
         pit = due | opp | cover

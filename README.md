@@ -17,15 +17,18 @@ Formula 1 yarış tahmin ve oran analiz motoru. Her tahmin, tur tur koşturulan 
 | Takım arkadaşı düellosu (kim önde bitirir) | **%72** (164 düello) |
 | Kazanan log loss (rastgele tahmin: 3.09, düşük = iyi) | **1.19** |
 
-### Sıralama turundan önce (grid de tahmin ediliyor)
+### Sıralama turundan önce (grid de tahmin ediliyor, FIA antrenman sonuçlarıyla)
 
 | Metrik | Expected F1 |
 |---|---|
 | Kazanan, ilk 3 favori arasında | **%73** |
 | Favori kazandı | **%53** |
-| Podyum isabeti | **%51** |
-| İlk 10 isabeti | **%75** |
-| Takım arkadaşı düellosu | **%61** |
+| Podyum isabeti | **%49** |
+| İlk 10 isabeti | **%78** |
+| Takım arkadaşı düellosu | **%64** |
+
+Antrenman verisinin eklenmesi sıralama öncesi birleşik log loss'u 17.45'ten **16.56**'ya, podyum Brier'ı 0.081'den
+**0.076**'ya indirdi (aynı 15 yarış, aynı ayarlar).
 
 ### Yarış yarış (sıralama turundan sonra)
 
@@ -54,8 +57,8 @@ Formula 1 yarış tahmin ve oran analiz motoru. Her tahmin, tur tur koşturulan 
 | | |
 |---|---|
 | Simülasyon / tahmin | 20.000 yarış × ~60 tur × 22 araç ≈ **25 milyon araç-tur** |
-| Eğitim verisi | **88 yarış**, **98.000+ tur**, **3.200+ pit stop**, **26.000+ sollama denemesi** (2023–2026) |
-| Model katmanları | Robust tur regresyonu · olay tespiti · Gauss süreci (Kalman araç gelişimi, ampirik Bayes) · yığınlama regresyonu · hiyerarşik lojistik sollama · hiyerarşik büzülme · start kalibrasyonu · elemeli sıralama · strateji dengesi · vektörize Monte Carlo · ileriye dönük kalibrasyon |
+| Eğitim verisi | **88 yarış**, **98.000+ tur**, **3.200+ pit stop**, **26.000+ sollama denemesi** (2023–2026), **FIA antrenman sınıflandırmaları** |
+| Model katmanları | Robust tur regresyonu · olay tespiti · Gauss süreci (Kalman araç gelişimi, ampirik Bayes) · antrenman yığınlaması · sıralama yığınlaması · hiyerarşik lojistik sollama · hiyerarşik büzülme · start kalibrasyonu · elemeli sıralama · strateji dengesi · vektörize Monte Carlo · ileriye dönük kalibrasyon |
 | Piyasalar | Kazanan, podyum, ilk 6/10, pole, DNF, en hızlı tur, ilk tur lideri, takım arkadaşı düellosu, favori hariç kazanan, kazanan takım, güvenlik aracı sayısı, kazanma farkı, bitiren araç sayısı, şampiyonluk |
 | Oran analizi | Marj (overround), seçim başına marj, Shin / power / orantılı adil oran, beklenen getiri |
 
@@ -64,13 +67,16 @@ Formula 1 yarış tahmin ve oran analiz motoru. Her tahmin, tur tur koşturulan 
 ```bash
 pip install -r requirements.txt
 python -m f1tahmin.laps 2026 2025 2024 2023
+python -m f1tahmin.fia
 python server.py
 ```
 
-İkinci komut tur verisini indirir. Jolpica'nın saatlik sınırı yüzünden ~1.5 saat sürer, kesilirse kaldığı yerden devam eder.
+İkinci komut tur verisini indirir (Jolpica'nın saatlik sınırı yüzünden ~1.5 saat), üçüncüsü FIA antrenman sınıflandırmalarını
+okur. İkisi de kesilirse kaldığı yerden devam eder.
 Ardından http://localhost:8765 adresini aç. Yeni yarış sonucu çıkınca **Verileri yenile** düğmesine bas.
 
 Veri kaynakları ücretsizdir ve API anahtarı gerekmez: [Jolpica-F1](https://github.com/jolpica/jolpica-f1) (sonuçlar, tur süreleri, pit stoplar),
+[FIA belgeleri](https://www.fia.com/documents/championships/fia-formula-one-world-championship-14) (antrenman sınıflandırmaları),
 [Open-Meteo](https://open-meteo.com) (yağmur tahmini).
 
 ## Güvenlik
