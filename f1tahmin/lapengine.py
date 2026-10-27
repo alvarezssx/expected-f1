@@ -20,7 +20,10 @@ TEAM_BIAS_K = 3.0              # takım sapması öncülü: ~3 yarışlık sıf�
 
 
 class LapEngine:
-    def __init__(self, races_current: list[dict], ts_v1: TrackStats):
+    def __init__(self, races_current: list[dict], ts_v1: TrackStats, season: int = data.CURRENT_SEASON):
+        """season: tahmin edilen sezon. Bu sezonun verisi yalnızca ilgili yarıştan öncesiyle kullanılır;
+        geçmiş sezonlar pist karakteri ve sollama modeli için. Backtest'te 2025 de bu şekilde tahmin edilir."""
+        self.season = season
         self.races = races_current
         self.ts_v1 = ts_v1
         self.reload()
@@ -30,15 +33,15 @@ class LapEngine:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", RuntimeWarning)
             for s in SEASONS:
-                compact = {r["round"]: r for r in (self.races if s == data.CURRENT_SEASON else data.races_compact(s))}
+                compact = {r["round"]: r for r in (self.races if s == self.season else data.races_compact(s))}
                 for rnd in laps.available(s):
                     if rnd in compact:
                         f = process_race(laps.load(s, rnd), compact[rnd])
                         if f:
                             feats.append(f)
         self.feats = feats
-        self.quali = data.qualifying(data.CURRENT_SEASON)
-        self.fp = fia.load(data.CURRENT_SEASON)
+        self.quali = data.qualifying(self.season)
+        self.fp = fia.load(self.season)
         self.use_fp = True
         self._ot_cache = {}
         self._gp_cache: dict = {}
@@ -54,7 +57,7 @@ class LapEngine:
     def _gps(self, rnd: int):
         """rnd'den ÖNCEKİ veriyle kurulan yarış ve sıralama GP'leri (önbellekli)."""
         if rnd not in self._gp_cache:
-            cur = [f for f in self.feats if f["season"] == data.CURRENT_SEASON]
+            cur = [f for f in self.feats if f["season"] == self.season]
             q_obs, q_sigma = quali_obs(self.quali, rnd)
             self._gp_cache[rnd] = (fit_gp(race_obs(cur, rnd)), fit_gp(q_obs), q_sigma)
         return self._gp_cache[rnd]
@@ -106,7 +109,7 @@ class LapEngine:
             return self._fp_rows_cache[r]
         sg = self.session_gaps(r)
         out = []
-        cur = [f for f in self.feats if f["season"] == data.CURRENT_SEASON]
+        cur = [f for f in self.feats if f["season"] == self.season]
         f_r = next((f for f in cur if f["round"] == r), None)
         qp = self._quali_pct(r)
         hit = next((q for q in self.quali if int(q["round"]) == r), None)
@@ -212,7 +215,7 @@ class LapEngine:
         (gerçek yarış temposu, GP yarış tahmini, GP sıralama tahmini, gerçek sıralama temposu)."""
         if r in self._wf_errors:
             return self._wf_errors[r]
-        cur = [f for f in self.feats if f["season"] == data.CURRENT_SEASON]
+        cur = [f for f in self.feats if f["season"] == self.season]
         f_r = next((f for f in cur if f["round"] == r), None)
         qp = self._quali_pct(r)
         out = []
@@ -250,20 +253,20 @@ class LapEngine:
         return out
 
     def ready_for(self, rnd: int) -> bool:
-        cur = [f for f in self.feats if f["season"] == data.CURRENT_SEASON and f["round"] < rnd]
+        cur = [f for f in self.feats if f["season"] == self.season and f["round"] < rnd]
         return len(cur) >= 3
 
     def _overtake(self, rnd: int):
         """Sollama modeli ve grid sırasına göre start gürültüsü (yalnızca bu yarıştan önceki veriyle)."""
         if rnd not in self._ot_cache:
-            past = [f for f in self.feats if (f["season"], f["round"]) < (data.CURRENT_SEASON, rnd)]
+            past = [f for f in self.feats if (f["season"], f["round"]) < (self.season, rnd)]
             self._ot_cache[rnd] = (fit_overtake(past), start_profile(past))
         return self._ot_cache[rnd]
 
     def build(self, rnd: int, circuit: str, entries, known_grid: list[str] | None,
               rain_prob: float, pace_scale: float = 1.0, form_scale: float = 1.0,
               fp_sessions: tuple[str, ...] = SESSIONS) -> tuple[Inputs, dict]:
-        cur_feats = [f for f in self.feats if f["season"] == data.CURRENT_SEASON]
+        cur_feats = [f for f in self.feats if f["season"] == self.season]
         gp_r, gp_q, q_sigma = self._gps(rnd)
 
         # sıralama ve yarış formu arasındaki korelasyon (artıklardan)
@@ -306,7 +309,7 @@ class LapEngine:
         p_dnf = np.array([rel.team_rate.get(e.team, rel.base) for e in entries]) * self.ts_v1.dnf(circuit)
 
         ot, profile = self._overtake(rnd)
-        tp = build_track_params(self.feats, circuit, (data.CURRENT_SEASON, rnd), ot, profile)
+        tp = build_track_params(self.feats, circuit, (self.season, rnd), ot, profile)
         team_eff, p_slow, slow_mean = team_pit_effects([f for f in cur_feats if f["round"] < rnd])
 
         grid = None

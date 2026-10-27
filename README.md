@@ -2,56 +2,41 @@
 
 Formula 1 yarış tahmin ve oran analiz motoru. Her tahmin, tur tur koşturulan **20.000 yarış simülasyonundan** gelir.
 
-## 2026 sezonu doğruluk oranları
+## Doğruluk oranları (2025 + 2026, 36 yarış)
 
-15 yarış (4.–18. yarışlar). Her yarış **yalnızca kendinden önceki verilerle** tahmin edildi; hiçbir tahmin sonucu önceden görmedi.
+Her yarış **yalnızca kendinden önceki verilerle** tahmin edildi; hiçbir tahmin sonucu önceden görmedi. 2025 sezonu
+aynı kodla, yalnızca o sezonun öncesini görerek ayrıca tahmin edildi ve ayarlar iki sezonun ortak sonucuna göre seçildi.
 
 ### Sıralama turundan sonra
 
-| Metrik | Expected F1 |
-|---|---|
-| Kazanan, modelin ilk 3 favorisi arasında | **%93** (14/15) |
-| Modelin favorisi yarışı kazandı | **%80** (12/15) |
-| Podyum isabeti (tahmin edilen ilk 3 ∩ gerçek ilk 3) | **%62** |
-| İlk 10 isabeti | **%79** |
-| Takım arkadaşı düellosu (kim önde bitirir) | **%72** (164 düello) |
-| Kazanan log loss (rastgele tahmin: 3.09, düşük = iyi) | **1.14** (kalibrasyonlu) |
-| Favoriye verilen ortalama kazanma olasılığı | **%55** (kalibrasyondan önce %38) |
-
-### Sıralama turundan önce (grid de tahmin ediliyor, FIA antrenman sonuçlarıyla)
-
-| Metrik | Expected F1 |
-|---|---|
-| Kazanan, ilk 3 favori arasında | **%73** |
-| Favori kazandı | **%53** |
-| Podyum isabeti | **%49** |
-| İlk 10 isabeti | **%78** |
-| Takım arkadaşı düellosu | **%64** |
-
-Antrenman verisinin eklenmesi sıralama öncesi birleşik log loss'u 17.45'ten **16.56**'ya, podyum Brier'ı 0.081'den
-**0.076**'ya indirdi (aynı 15 yarış, aynı ayarlar).
-
-### Yarış yarış (sıralama turundan sonra)
-
-| Yarış | Kazanan | Modelin favorisi | Kazanana verilen olasılık |
+| Metrik | 2026 (15 yarış) | 2025 (21 yarış) | **Toplam (36)** |
 |---|---|---|---|
-| 4 · Miami | Antonelli | ✅ Antonelli | %50 |
-| 5 · Kanada | Antonelli | ✅ Antonelli | %31 |
-| 6 · Monaco | Antonelli | ✅ Antonelli | %51 |
-| 7 · Barselona | Hamilton | Russell | %25 |
-| 8 · Avusturya | Russell | ✅ Russell | %36 |
-| 9 · Britanya | Leclerc | Antonelli | %15 |
-| 10 · Belçika | Antonelli | ✅ Antonelli | %49 |
-| 11 · Macaristan | Norris | ✅ Norris | %26 |
-| 12 · Hollanda | Norris | ✅ Norris | %38 |
-| 13 · İtalya | Antonelli | Russell | %4 |
-| 14 · İspanya (Madrid) | Antonelli | ✅ Antonelli | %31 |
-| 15 · Azerbaycan | Russell | ✅ Russell | %50 |
-| 16 · Bahreyn (Sepang) | Verstappen | ✅ Verstappen | %40 |
-| 17 · Singapur | Verstappen | ✅ Verstappen | %35 |
-| 18 · ABD | Antonelli | ✅ Antonelli | %36 |
+| Kazanan, modelin ilk 3 favorisi arasında | %93 (14/15) | %100 (21/21) | **%97** (35/36) |
+| Modelin favorisi yarışı kazandı | %80 (12/15) | %48 (10/21) | **%61** (22/36) |
+| Podyum isabeti (tahmin edilen ilk 3 ∩ gerçek ilk 3) | %62 | %76 | **%70** |
+| İlk 10 isabeti | %79 | %76 | **%77** |
+| Takım arkadaşı düellosu | %72 | %72 | **%72** (374 düello) |
+| Kazanan log loss (rastgele: 3.09, düşük = iyi) | 1.22 | 1.04 | **1.12** |
 
-Ölçek için: 22 araçlı alanda rastgele bir tahmin kazanana %4.5 verir.
+Favorinin kazanma oranı sezonun yapısına bağlı: 2025'te McLaren'ın iki pilotu ve Verstappen her hafta çekişti
+(kazanan yine de her yarışta ilk 3 favori arasındaydı), 2026'da bir takım daha baskın.
+
+**Kazanma olasılığı kalibrasyonu:** simülasyonlar kazananın olasılığına göre yeniden ağırlıklanır (katsayı yalnızca
+geçmiş yarışlardan). 36 yarışta favoriye verilen ortalama olasılık **%62**, favorinin gerçek kazanma oranı **%61** —
+olasılıklar gerçekleşen oranla örtüşüyor. Kazanan log loss 1.117 → **1.090** (ileriye dönük).
+
+### Sıralama turundan önce (grid de tahmin ediliyor)
+
+| Metrik | 2026 (FIA antrenman verisiyle) | 2025 (antrenmansız) | **Toplam (36)** |
+|---|---|---|---|
+| Kazanan, ilk 3 favori arasında | %67 | %86 | **%78** |
+| Favori kazandı | %53 | %29 | **%39** |
+| Podyum isabeti | %49 | %63 | **%57** |
+| İlk 10 isabeti | %78 | %71 | **%74** |
+| Takım arkadaşı düellosu | %64 | %70 | **%67** |
+
+2025 antrenman sınıflandırmalarının çoğu FIA'nın istek sınırı nedeniyle indirilemediği için 2025 sıralama öncesi
+tahminleri antrenman verisi olmadan yapıldı.
 
 ## Motor
 

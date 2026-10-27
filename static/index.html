@@ -445,15 +445,23 @@ async function loadPerf(){
         </div>
         <div><h2>Kalibrasyon (${s2?'v2':'v1'}, podyum + ilk 10)</h2>${calibSvg(s.calibration)}<p class="note">Noktalar kesikli çizgiye ne kadar yakınsa olasılıklar o kadar dürüst.</p>
           <h2 style="margin-top:12px">Yarış yarış: gerçek kazanana verilen olasılık</h2><div class="tablewrap"><table><thead><tr><th class="l">Yarış</th><th class="l">Kazanan</th><th>v1</th><th>v2</th></tr></thead><tbody>
-            ${s1.per_round.map((r,i) => `<tr><td class="l">${esc(r.round)}</td><td class="l">${esc(r.winner)}</td><td>${pct(r.p_winner)}</td><td>${s2?pct(s2.per_round[i].p_winner):'—'}</td></tr>`).join('')}
+            ${s1.per_round.map((r,i) => `<tr><td class="l">${esc(r.season || '')} · ${esc(r.round)}</td><td class="l">${esc(r.winner)}</td><td>${pct(r.p_winner)}</td><td>${s2?pct(s2.per_round[i].p_winner):'—'}</td></tr>`).join('')}
           </tbody></table></div></div></div></div>`;
     };
     const rounds = b.v1.rounds;
     const post = b.v2 ? v2best(b.v2.modes.post_quali) : v1best(b.v1.modes.post_quali);
     const pre = b.v2 ? v2best(b.v2.modes.pre_quali) : v1best(b.v1.modes.pre_quali);
     const big = (v, label, sub) => `<div class="big"><b>${pct(v,0)}</b><span>${label}${sub?`<br><small>${sub}</small>`:''}</span></div>`;
-    $('#perfBody').innerHTML = `<h1>2026 sezonu doğruluk oranları</h1>
-      <p class="sub">${rounds.length} yarış (${rounds[0]}–${rounds[rounds.length-1]}. yarışlar), her biri yalnızca kendinden önceki verilerle tahmin edildi. Sıralama turu sonrası tahminler:</p>
+    const seasonCount = {};
+    rounds.forEach(r => { const s = Array.isArray(r) ? r[0] : ''; seasonCount[s] = (seasonCount[s] || 0) + 1; });
+    const seasonText = Object.entries(seasonCount).map(([s, n]) => `${esc(s)}: ${n}`).join(', ');
+    const bySeason = b.v2 ? ['post_quali', 'pre_quali'].map(key => {
+      const bs = b.v2.modes[key].by_season || {};
+      return Object.entries(bs).map(([s, v]) => `<tr><td class="l">${key === 'post_quali' ? 'Sıralama sonrası' : 'Sıralama öncesi'} · ${esc(s)}</td>
+        <td>${v.n_races}</td><td>${pct(v.fav_won,0)}</td><td>${pct(v.winner_in_top3,0)}</td><td>${pct(v.podium_hit,0)}</td><td>${pct(v.top10_hit,0)}</td><td>${pct(v.h2h_acc,0)}</td><td>${num(v.logloss,3)}</td></tr>`).join('');
+    }).join('') : '';
+    $('#perfBody').innerHTML = `<h1>Doğruluk oranları</h1>
+      <p class="sub">${rounds.length} yarış (${seasonText}); her biri yalnızca kendinden önceki verilerle tahmin edildi. Sıralama turu sonrası tahminler:</p>
       <div class="bigstats">
         ${big(post.winner_in_top3, 'Kazanan, ilk 3 favori arasında')}
         ${big(post.fav_won, 'Favori kazandı')}
@@ -462,6 +470,9 @@ async function loadPerf(){
         ${big(post.h2h_acc, 'Takım arkadaşı düellosu', post.h2h_n + ' düello')}
         ${big(pre.winner_in_top3, 'Sıralama turundan önce: kazanan ilk 3 favoride')}
       </div>
+      ${bySeason ? `<div class="panel"><h2>Sezon sezon</h2><div class="tablewrap"><table>
+        <thead><tr><th class="l">Tahmin · sezon</th><th>Yarış</th><th>Favori kazandı</th><th>Kazanan ilk 3'te</th><th>Podyum isabeti</th><th>İlk 10 isabeti</th><th>Takım arkadaşı</th><th>Kazanan log loss</th></tr></thead>
+        <tbody>${bySeason}</tbody></table></div></div>` : ''}
       ${b.win_calibration && b.win_calibration.post_quali ? (() => { const c = b.win_calibration.post_quali; return `
       <div class="panel"><h2>Kazanma olasılığı kalibrasyonu (sıralama sonrası)</h2>
         <div class="tablewrap"><table><tbody>

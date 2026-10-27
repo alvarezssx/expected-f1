@@ -132,20 +132,27 @@ def fetch_season(season: int = data.CURRENT_SEASON, refresh: bool = False) -> di
         entries[r["round"]] = {_norm(x["name"].split(" ", 1)[-1]): x["driver"] for x in r["results"]}
     last_entries = entries[max(entries)] if entries else {}
 
+    # FIA belge adı sezona göre değişiyor: 2026 "free_practice_1", 2025 "p1"
+    styles = ["free_practice_{n}", "p{n}"] if season >= 2026 else ["p{n}", "free_practice_{n}"]
     for slug in event_slugs(season):
         for n in (1, 2, 3):
             sess = f"FP{n}"
-            path = f"/system/files/decision-document/{season}_{slug}_-_free_practice_{n}_classification.pdf"
-            if path in tried:
-                continue
-            try:
-                pdf = _get(BASE + path)
-            except HTTPError as e:
-                if e.code == 404:  # sprint hafta sonunda FP2/FP3 yok ya da ad varyantı tutmadı
-                    tried[path] = "404"
-                    tried_path.write_text(json.dumps(tried), encoding="utf-8")
+            pdf = path = None
+            for style in styles:
+                cand = f"/system/files/decision-document/{season}_{slug}_-_{style.format(n=n)}_classification.pdf"
+                if cand in tried:
                     continue
-                raise
+                try:
+                    pdf, path = _get(BASE + cand), cand
+                    break
+                except HTTPError as e:
+                    if e.code == 404:  # sprint hafta sonunda FP2/FP3 yok ya da ad varyantı tutmadı
+                        tried[cand] = "404"
+                        tried_path.write_text(json.dumps(tried), encoding="utf-8")
+                        continue
+                    raise
+            if pdf is None:
+                continue
             doc_date, rows = parse_classification(pdf)
             # antrenman belgesi yarıştan 0-3 gün önce yayınlanır
             rnd = next((r for d, r in sched.items() if doc_date and 0 <= (d - doc_date).days <= 3), None)

@@ -21,44 +21,60 @@ from .simulate import POINTS, Entry, SimResult, simulate, summarize, market_prob
 SPRINT_POINTS = np.array([8, 7, 6, 5, 4, 3, 2, 1] + [0] * 30)
 # v2 kalibrasyon ızgarası: (tempo ölçeği, form ölçeği)
 V2_GRID = [(s, f) for s in (0.8, 1.0, 1.25) for f in (0.0, 0.35, 0.7)]
+BACKTEST_EXTRA_SEASONS = [2025]  # doğrulama: bu sezonlar da ayrıca tahmin edilip ayar seçimine katılır
 V2_CACHE = data.CACHE / "backtest_v2.json"
-V2_VERSION = 14  # simülatör/model kodu değişince artır: diskteki backtest geçersiz olur
+V2_VERSION = 15  # simülatör/model kodu değişince artır: diskteki backtest geçersiz olur
 
 
 class Engine:
-    def __init__(self, refresh: bool = False):
+    def __init__(self, refresh: bool = False, season: int = data.CURRENT_SEASON, light: bool = False):
+        """light=True: yalnızca backtest koşuları üretir (geçmiş sezonu doğrulamak için), kendi
+        kalibrasyonunu yapmaz; ayarlar ana motordan gelir."""
+        self.season = season
+        self.light = light
         self.lock = threading.RLock()
         self.load(refresh)
 
     def load(self, refresh: bool = False):
-        self.calendar = data.schedule(refresh=refresh)
-        self.races = data.races_compact(data.CURRENT_SEASON, refresh=refresh)
-        self.standings = data.driver_standings(refresh=refresh)
-        history = [r for s in data.HISTORY_SEASONS for r in data.races_compact(s)]
+        self.calendar = data.schedule(self.season, refresh=refresh)
+        self.races = data.races_compact(self.season, refresh=refresh)
+        self.standings = data.driver_standings(self.season, refresh=refresh)
+        history = [r for s in data.HISTORY_SEASONS if s < self.season for r in data.races_compact(s)]
         self.sc_history = data.safety_car_history(self.calendar)
         self.ts = track_stats(history, self.sc_history)
         self.done = {r["round"] for r in self.races}
         self._pred_cache: dict = {}
         self._sims: dict = {}
         self._backtest = None
-        if refresh:  # yeni biten yarışların tur verisini ve FIA antrenman sonuçlarını indir
-            have = set(laps.available(data.CURRENT_SEASON))
+        if refresh and self.season == data.CURRENT_SEASON:  # yeni yarışların tur ve antrenman verisi
+            have = set(laps.available(self.season))
             for rd in sorted(self.done - have):
-                laps.fetch_race(data.CURRENT_SEASON, rd)
+                laps.fetch_race(self.season, rd)
             try:
-                fia.fetch_season(data.CURRENT_SEASON, refresh=True)
+                fia.fetch_season(self.season, refresh=True)
             except Exception as e:  # FIA erişilemezse eldeki antrenman verisiyle devam
                 print(f"FIA antrenman verisi alınamadı: {type(e).__name__}", flush=True)
-        self.lap = LapEngine(self.races, self.ts)
-        # v1 kalibrasyonu: birleşik log loss'u en düşük sıcaklık
+        self.lap = LapEngine(self.races, self.ts, self.season)
         self.temps = {"pre": 1.0, "post": 1.0}
+        self.v2_params = {"pre": (1.0, 1.0), "post": (1.0, 1.0)}
+        self.win_k = {"pre": 1.0, "post": 1.0}
+        self.win_calib = {}
+        self._result_map = {(self.season, r["round"]): {x["driver"]: x for x in r["results"]} for r in self.races}
+        if self.light:
+            # 2025 antrenman verisinin çoğu FIA'nın istek sınırı yüzünden indirilemedi; yarım veriyle
+            # tutarsız karışım olmasın diye doğrulama sezonunda sıralama öncesi antrenmansız tahmin edilir.
+            self.lap.use_fp = False
+            self.extra = []
+            return
+        # Doğrulama: geçmiş sezon(lar) da aynı kodla, yalnızca o sezonun öncesini görerek tahmin edilir
+        self.extra = [Engine(season=s, light=True) for s in BACKTEST_EXTRA_SEASONS]
+        for e in self.extra:
+            self._result_map.update(e._result_map)
+        # v1 kalibrasyonu: birleşik log loss'u en düşük sıcaklık
         bt = self.backtest_v1()
         self.temps = {"pre": bt["modes"]["pre_quali"]["best_temperature"],
                       "post": bt["modes"]["post_quali"]["best_temperature"]}
         # v2 kalibrasyonu: tempo ve form ölçeği (diskte saklanır; yeni veri gelince yeniden hesaplanır)
-        self.v2_params = {"pre": (1.0, 1.0), "post": (1.0, 1.0)}
-        self.win_k = {"pre": 1.0, "post": 1.0}
-        self.win_calib = {}
         bt2 = self.backtest_v2()
         if bt2:
             self.v2_params = {"pre": tuple(bt2["modes"]["pre_quali"]["best"]),
@@ -99,7 +115,7 @@ class Engine:
             return race["quali"]
         # Sıralama yapıldı ama yarış henüz koşulmadıysa: ayrı uç noktadan bak
         try:
-            q = data.qualifying(data.CURRENT_SEASON)
+            q = data.qualifying(self.season)
         except Exception:
             return None
         hit = next((r for r in q if int(r["round"]) == round_), None)
@@ -210,20 +226,21 @@ class Engine:
     # Backtest: her yarışı yalnızca ÖNCEKİ yarışlarla tahmin et (sızıntı yok)
     # ------------------------------------------------------------------ #
 
-    def _score(self, runs: list[tuple[int, list[str], np.ndarray]]) -> dict:
+    def _score(self, runs: list[tuple[int, int, list[str], np.ndarray]]) -> dict:
+        """runs: [(sezon, yarış, sürücüler, pozisyon matrisi)] — birden çok sezon birlikte puanlanabilir."""
         stats = {"logloss": [], "ll_place": [], "brier_win": [], "brier_podium": [], "brier_top10": [],
                  "fav_won": [], "winner_in_top3": [], "calib": [], "per_round": [],
                  "podium_hit": [], "top10_hit": [], "h2h": []}
         n = 20
-        for rd, drivers, pos in runs:
-            res = {x["driver"]: x for x in next(r for r in self.races if r["round"] == rd)["results"]}
+        for season, rd, drivers, pos in runs:
+            res = self._result_map[(season, rd)]
             n = len(drivers)
             p_win, p_pod, p_t10 = (np.mean(pos == 1, axis=0), np.mean(pos <= 3, axis=0), np.mean(pos <= 10, axis=0))
             actual = np.array([res[d]["pos"] if d in res else 99 for d in drivers])
             winner = int(np.argmin(actual))
             ll = -math.log(max(p_win[winner], 1e-4))
             stats["logloss"].append(ll)
-            stats["per_round"].append({"round": rd, "logloss": ll, "p_winner": float(p_win[winner]),
+            stats["per_round"].append({"season": season, "round": rd, "logloss": ll, "p_winner": float(p_win[winner]),
                                        "winner": drivers[winner], "favourite": drivers[int(np.argmax(p_win))],
                                        "p_win": [round(float(x), 5) for x in p_win], "winner_idx": winner})
             stats["ll_place"].append(_binary_ll(p_pod, actual <= 3) + _binary_ll(p_t10, actual <= 10))
@@ -271,30 +288,39 @@ class Engine:
     def _bt_rounds(self, start_round: int = 4) -> list[int]:
         return sorted(r for r in self.done if r >= start_round and self.lap.ready_for(r))
 
+    def _engines(self) -> list["Engine"]:
+        """Backtest'te tahmin edilen sezonlar: bu sezon + doğrulama sezonları."""
+        return [self] + self.extra
+
+    def _bt_all_rounds(self) -> list[tuple["Engine", int]]:
+        return [(e, rd) for e in self._engines() for rd in e._bt_rounds()]
+
     def backtest_v1(self, temps=(0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.2), n_sims: int = 6000) -> dict:
-        rounds = self._bt_rounds()
+        todo = self._bt_all_rounds()
         modes = {}
         for mode, grid_mode in (("pre_quali", "simulated"), ("post_quali", "actual")):
             per = {}
             for T in temps:
                 runs = []
-                for rd in rounds:
-                    sim, *_ = self._run(rd, grid_mode, n_sims=n_sims, temperature=T, rain_prob=0.0)
-                    runs.append((rd, [e.driver for e in sim.entries], sim.positions))
+                for e, rd in todo:
+                    sim, *_ = e._run(rd, grid_mode, n_sims=n_sims, temperature=T, rain_prob=0.0)
+                    runs.append((e.season, rd, [x.driver for x in sim.entries], sim.positions))
                 per[T] = self._score(runs)
             best = min(per, key=lambda t: per[t]["combined"])
             modes[mode] = {"by_temperature": {str(k): v for k, v in per.items()}, "best_temperature": best}
-        self._bt_v1 = {"rounds": rounds, "modes": modes}
+        self._bt_v1 = {"rounds": [[e.season, rd] for e, rd in todo], "modes": modes}
         return self._bt_v1
 
     def _v2_signature(self) -> str:
-        fp_cov = {r: sorted(s) for r, s in sorted(self.lap.fp.items())} if self.lap.use_fp else {}
-        return json.dumps({"cov": self.lap.coverage(), "done": sorted(self.done), "grid": V2_GRID,
-                           "fp": fp_cov, "v": V2_VERSION})
+        sig = {"grid": V2_GRID, "v": V2_VERSION}
+        for e in self._engines():
+            fp_cov = {r: sorted(s) for r, s in sorted(e.lap.fp.items())} if e.lap.use_fp else {}
+            sig[str(e.season)] = {"cov": e.lap.coverage(), "done": sorted(e.done), "fp": fp_cov}
+        return json.dumps(sig)
 
     def backtest_v2(self, n_sims: int = 3000, force: bool = False) -> dict | None:
-        rounds = self._bt_rounds()
-        if not rounds:
+        todo = self._bt_all_rounds()
+        if not todo:
             return None
         sig = self._v2_signature()
         if V2_CACHE.exists() and not force:
@@ -302,22 +328,29 @@ class Engine:
             if cached.get("signature") == sig:
                 self._bt_v2 = cached
                 return cached
-        print(f"v2 backtest: {len(rounds)} yarış × 2 mod × {len(V2_GRID)} ayar ...", flush=True)
+        print(f"v2 backtest: {len(todo)} yarış ({', '.join(str(e.season) for e in self._engines())}) "
+              f"× 2 mod × {len(V2_GRID)} ayar ...", flush=True)
         modes = {}
         for mode, grid_mode in (("pre_quali", "simulated"), ("post_quali", "actual")):
-            per = {}
+            per, runs_by = {}, {}
             for params in V2_GRID:
                 runs = []
-                for rd in rounds:
-                    rs, _, _, _, sim = self._run_v2(rd, grid_mode, n_sims=n_sims, params=params, rain_prob=0.0,
-                                                    calibrate=False)
-                    runs.append((rd, [e.driver for e in sim.entries], rs.positions))
+                for e, rd in todo:
+                    rs, _, _, _, sim = e._run_v2(rd, grid_mode, n_sims=n_sims, params=params, rain_prob=0.0,
+                                                 calibrate=False)
+                    runs.append((e.season, rd, [x.driver for x in sim.entries], rs.positions))
                 per[params] = self._score(runs)
+                runs_by[params] = runs
                 print(f"  {mode} tempo×{params[0]} form×{params[1]}: log loss {per[params]['logloss']:.3f}, "
                       f"birleşik {per[params]['combined']:.2f}", flush=True)
             best = min(per, key=lambda k: per[k]["combined"])
-            modes[mode] = {"by_params": {f"{k[0]}|{k[1]}": v for k, v in per.items()}, "best": list(best)}
-        out = {"signature": sig, "rounds": rounds, "modes": modes}
+            by_season = {}
+            for e in self._engines():
+                s = self._score([r for r in runs_by[best] if r[0] == e.season])
+                by_season[str(e.season)] = {k: v for k, v in s.items() if k not in ("per_round", "calibration")}
+            modes[mode] = {"by_params": {f"{k[0]}|{k[1]}": v for k, v in per.items()}, "best": list(best),
+                           "by_season": by_season}
+        out = {"signature": sig, "rounds": [[e.season, rd] for e, rd in todo], "modes": modes}
         V2_CACHE.write_text(json.dumps(out), encoding="utf-8")
         self._bt_v2 = out
         return out
