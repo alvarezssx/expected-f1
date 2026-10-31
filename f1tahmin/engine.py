@@ -50,10 +50,14 @@ class Engine:
             have = set(laps.available(self.season))
             for rd in sorted(self.done - have):
                 laps.fetch_race(self.season, rd)
-            try:
-                fia.fetch_season(self.season, refresh=True)
-            except Exception as e:  # FIA erişilemezse eldeki antrenman verisiyle devam
-                print(f"FIA antrenman verisi alınamadı: {type(e).__name__}", flush=True)
+            # sıradaki yarış: Jolpica'da henüz yoksa sıralama sonucunu ve antrenmanları FIA'dan al
+            nxt = min((int(r["round"]) for r in self.calendar if int(r["round"]) not in self.done), default=None)
+            if nxt:
+                try:
+                    fia.fetch_event_fp(self.season, nxt)
+                    fia.merge_qualifying(self.season, nxt)
+                except Exception as e:  # FIA erişilemezse eldeki veriyle devam
+                    print(f"FIA verisi alınamadı: {type(e).__name__}", flush=True)
         self.lap = LapEngine(self.races, self.ts, self.season)
         self.temps = {"pre": 1.0, "post": 1.0}
         self.v2_params = {"pre": (1.0, 1.0), "post": (1.0, 1.0)}
@@ -106,6 +110,14 @@ class Engine:
 
     def entries_for(self, round_: int) -> list[Entry]:
         own = next((r for r in self.races if r["round"] == round_), None)
+        if not own:
+            # yaklaşan yarış: sıralama yapıldıysa kadro oradan (yedek pilotlar dahil)
+            hit = next((q for q in data.qualifying(self.season) if int(q["round"]) == round_), None)
+            if hit:
+                return [Entry(x["Driver"]["driverId"], x["Constructor"]["constructorId"],
+                              x["Driver"].get("code") or x["Driver"]["familyName"][:3].upper(),
+                              f'{x["Driver"]["givenName"]} {x["Driver"]["familyName"]}', x["Constructor"]["name"])
+                        for x in hit["QualifyingResults"]]
         src = own or max((r for r in self.races if r["round"] < round_), key=lambda r: r["round"])
         return [Entry(x["driver"], x["team"], x["code"], x["name"], x["team_name"]) for x in src["results"]]
 
@@ -314,7 +326,8 @@ class Engine:
     def _v2_signature(self) -> str:
         sig = {"grid": V2_GRID, "v": V2_VERSION}
         for e in self._engines():
-            fp_cov = {r: sorted(s) for r, s in sorted(e.lap.fp.items())} if e.lap.use_fp else {}
+            # yalnızca bitmiş yarışların antrenman verisi (yaklaşan yarışın verisi backtest'i değiştirmez)
+            fp_cov = {r: sorted(s) for r, s in sorted(e.lap.fp.items()) if r in e.done} if e.lap.use_fp else {}
             sig[str(e.season)] = {"cov": e.lap.coverage(), "done": sorted(e.done), "fp": fp_cov}
         return json.dumps(sig)
 
